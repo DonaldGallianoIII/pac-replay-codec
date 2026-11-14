@@ -134,6 +134,7 @@ function outputName(name, kind) {
 
 /** @complexity O(D) over the D files added */
 function addFiles(fileList) {
+  if (fileList.length === 0) return;
   for (const file of fileList) {
     const entry = { id: state.nextId++, file, name: file.name, inSize: file.size, status: 'waiting', result: null,
       blob: null, url: null, outName: null, row: null };
@@ -338,7 +339,8 @@ function renderRow(entry) {
           attrs: { 'aria-label': `Download ${entry.outName}` } })),
     );
   } else if (r && !r.ok) {
-    cells.push(el('div', { class: 'row-foot' }, el('span', { class: 'check bad', text: `✗ ${r.error}` })));
+    cells.push(el('div', { class: 'row-foot' }, el('span', { class: 'check bad', text: `✗ ${friendlyError(r.error)}` })),
+      el('details', { class: 'raw-error' }, el('summary', { text: 'Exact message' }), el('code', { text: r.error })));
   } else {
     cells.push(el('div', { class: 'row-sizes muted' }, el('span', { text: formatBytes(entry.inSize) })));
   }
@@ -356,6 +358,15 @@ function miniBar(frac, packed) {
     'aria-label': `${packed ? 'Packed' : 'Packed input'} is ${(frac * PERCENT).toFixed(1)}% of the replay` } },
     el('div', { class: 'mini-track' }),
     el('div', { class: 'mini-fill', style: { width: `${pct}%` } }));
+}
+
+/** Plain words and a next step for the codec's common errors; anything else is shown as it came. @complexity O(1) */
+function friendlyError(msg) {
+  if (/damaged|crc32 mismatch/.test(msg)) return 'This .clrz is damaged or cut short. Pack the original replay again.';
+  if (/format version|predictor set|mode \d+ is not supported/.test(msg)) return 'This .clrz was made by a newer version of the codec. Use that version to unpack it.';
+  if (/starting model/.test(msg)) return 'This .clrz was packed with a starting model this page does not have.';
+  if (/could not read the file/.test(msg)) return 'The browser could not read this file. If it is a folder, drop the folder itself, not its shortcut.';
+  return msg;
 }
 
 /** @complexity O(1) */
@@ -409,16 +420,55 @@ function wireDrop() {
   const zone = mounts.drop;
   const over = (e) => { e.preventDefault(); zone.classList.add('is-over'); };
   const leave = () => zone.classList.remove('is-over');
-  const drop = (e) => {
+  const drop = async (e) => {
     e.preventDefault();
     leave();
-    if (e.dataTransfer && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+    if (!e.dataTransfer) return;
+    // Entries must be taken while the event is live; reading them can wait.
+    const entries = Array.from(e.dataTransfer.items || [])
+      .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null));
+    if (entries.length > 0 && entries.every(Boolean)) addFiles(await filesFromEntries(entries));
+    else if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
   };
   // The whole window accepts a drop, so a near miss does not open the file in the tab.
   window.addEventListener('dragover', over);
   window.addEventListener('dragleave', (e) => { if (e.target === document.documentElement || !e.relatedTarget) leave(); });
   window.addEventListener('drop', drop);
   mounts.input.addEventListener('change', () => { addFiles(mounts.input.files); mounts.input.value = ''; });
+}
+
+/**
+ * The files under dropped entries. A file dropped on its own is always taken; inside a dropped folder only
+ * .colreplay and .clrz files are, so a folder of mixed things does not fill the list with "kept as is".
+ * @complexity O(E) over every entry in the dropped folders
+ * @alloc one File handle per kept file
+ */
+async function filesFromEntries(entries) {
+  const out = [];
+  const wanted = (name) => {
+    const n = name.toLowerCase();
+    return n.endsWith(CONFIG.REPLAY_EXT) || n.endsWith(CONFIG.PACKED_EXT);
+  };
+  const fileOf = (entry) => new Promise((resolve, reject) => entry.file(resolve, reject));
+  const readAll = async (dir) => {
+    const reader = dir.createReader();
+    const all = [];
+    // readEntries hands back the folder in batches; an empty batch means the end
+    for (;;) {
+      const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+      if (batch.length === 0) return all;
+      all.push(...batch);
+    }
+  };
+  const walk = async (entry, top) => {
+    if (entry.isFile) {
+      if (top || wanted(entry.name)) out.push(await fileOf(entry));
+    } else if (entry.isDirectory) {
+      for (const child of await readAll(entry)) await walk(child, false);
+    }
+  };
+  for (const entry of entries) await walk(entry, true);
+  return out;
 }
 
 /* ------------------------------------------------------------------- theme */
