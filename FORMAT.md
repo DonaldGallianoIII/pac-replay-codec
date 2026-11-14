@@ -25,8 +25,11 @@ body            the rest of the file
 The packer picks stored mode when the input is not a replay or when coding would not make it smaller. Every input
 packs and unpacks.
 
-The unpacker refuses a header that claims more than 65,536 original bytes per packed byte, rebuilds the original,
-and checks its length and crc32 before returning it. A damaged file throws; it is never returned wrong.
+For a coded body (modes 0 and 2) the unpacker refuses, before it allocates anything, a header that claims more
+than 256 MB (`MAX_ORIGINAL_BYTES`) or more than 1,024 original bytes per packed byte (`EXPANSION_MAX`). The packer
+stores an input that would break either limit, so every file it writes can be unpacked. Then the unpacker rebuilds
+the original and checks its length and crc32 before returning it. A damaged file throws; it is never returned
+wrong.
 
 The packer writes predictor set 1 only when the replay's meta block names a game version this build knows
 (`"game":{"version":"6.11.`). The choice is in the header, so the unpacker never guesses.

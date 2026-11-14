@@ -26,3 +26,4 @@ export const result: Assignable<Src.PackResult, Lib.PackResult> = true;
 export const prior: Assignable<Src.Prior, Lib.Prior> = true;
 export const unpackArgs: Assignable<Parameters<typeof Src.unpackReplay>[0], Parameters<typeof Lib.unpackReplay>[0]> = true;
 export const constants: Same<typeof Lib.MODE_STORED | typeof Lib.FORMAT_VERSION, number> = true;
+export const limits: Same<typeof Lib.MAX_ORIGINAL_BYTES | typeof Lib.EXPANSION_MAX, typeof Src.MAX_ORIGINAL_BYTES | typeof Src.EXPANSION_MAX> = true;

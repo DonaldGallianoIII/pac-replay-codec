@@ -8,8 +8,8 @@ First public release.
   size and crc32. The format is locked by the sha256 tests in `test/codec.test.ts`; see [FORMAT.md](FORMAT.md).
 - **Size.** On 100 sample replays packed one by one: worst 10.2x, median 11.4x, best 12.4x smaller than the raw
   file. Smaller files compress slightly worse.
-- **Web page** (`web/`). Drop replays or folders to pack, drop `.clrz` to unpack. Runs in the browser, no
-  network access. Every pack is unpacked again and compared byte for byte before it is offered.
+- **Web page** (`web/`). Drop replays or folders to pack, drop `.clrz` to unpack. Runs in the browser and
+  makes no network requests. Every pack is unpacked again and compared byte for byte before it is offered.
 - **Command line tool** `pac-replay-codec`: `pack`, `unpack` and `verify` over files and folders, on several
   threads, with `--json` output for scripts and AI agents. Never deletes or replaces a file.
 - **Library**: `packReplay` and `unpackReplay`, no dependencies, Node and browsers.

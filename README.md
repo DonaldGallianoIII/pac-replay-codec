@@ -108,8 +108,9 @@ python3 -m http.server 8000 --bind 127.0.0.1 --directory web
 ```
 
 Then open <http://127.0.0.1:8000/>. Any static file server works, at the root or under a subpath; every path in
-the page is relative. The page's content security policy blocks every network connection, so it cannot send your
-files anywhere even if it wanted to.
+the page is relative. The page and its code make no network requests, and the page's content security policy
+blocks connections from it. The policy is set in the page, so it covers the page; its background workers take
+their policy from the server, which is why the code itself never makes a request either.
 
 `web/lib/` is `src/` with the types stripped. After you change `src/`, run `node tools/build-web.mjs` to rebuild
 it (Node's own type stripper, nothing to install). A test fails if you forget.

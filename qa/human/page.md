@@ -3,7 +3,8 @@
 Serve it: `python3 -m http.server 8000 --bind 127.0.0.1 --directory web`, open <http://127.0.0.1:8000/>.
 You need a few `.colreplay` files of your own.
 
-1. Empty page. The big number reads "11.2x smaller" with a line saying it is the benchmark result.
+1. Empty page. The big number reads "Up to 12.4x smaller*" with "median 11.4x, worst 10.2x on 100 sample
+   replays" under it, and the footnote "*Smaller files compress slightly worse." sits under the tagline.
 2. Drop 3 replays. Each row goes Waiting, Working, Exact. The big number switches to your files.
    The chart shows two bars from zero with sizes as text.
 3. Each finished row says "exact: verified by checksum ... and a full unpack, byte for byte".

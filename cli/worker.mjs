@@ -51,10 +51,15 @@ function writeNew(out, bytes, id) {
     return true;
   } catch (err) {
     if (err.code === 'EEXIST') return false;
-    // A file system without hard links: check, then rename. A race with another writer is possible only here.
-    if (fs.existsSync(out)) return false;
-    fs.renameSync(tmp, out);
-    return true;
+    // A file system without hard links (FAT32, exFAT): copy with an exclusive create, which still refuses an
+    // existing output in one step. Only here can a crash mid-copy leave a partial output behind.
+    try {
+      fs.copyFileSync(tmp, out, fs.constants.COPYFILE_EXCL);
+      return true;
+    } catch (copyErr) {
+      if (copyErr.code === 'EEXIST') return false;
+      throw copyErr;
+    }
   } finally {
     fs.rmSync(tmp, { force: true });
   }

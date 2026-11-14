@@ -95,3 +95,7 @@ export const PREDICTORS_PAC_MINIGAME: number;
 export const MODE_CODED: number;
 export const MODE_STORED: number;
 export const MODE_PRIOR: number;
+/** The largest original a coded file may claim (256 MB); the unpacker refuses more before allocating. */
+export const MAX_ORIGINAL_BYTES: number;
+/** The most original bytes a coded file may claim per packed byte (1024). */
+export const EXPANSION_MAX: number;

@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- connect-src 'none': this page cannot send anything anywhere. The codec runs in this tab. -->
+  <!-- connect-src 'none' blocks connections from this page. The policy covers the page; its workers get theirs from
+       the server, and none of the page's code makes a network request. The codec runs in this tab. -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
   <title>PAC Replay Codec</title>
@@ -37,8 +38,8 @@
 
     <p class="local">
       <span class="local-icon" aria-hidden="true">⌂</span>
-      <span><b>Runs in this tab. Nothing is uploaded.</b> The page has no network access at all: its security policy
-      blocks every connection, and the codec is plain JavaScript loaded with it.</span>
+      <span><b>Runs in this tab. Nothing is uploaded.</b> This page and its code make no network requests, and the
+      page's security policy blocks connections from it. The codec is plain JavaScript loaded with the page.</span>
     </p>
 
     <p id="announce" class="sr-only" aria-live="polite"></p>

@@ -47,8 +47,18 @@ export const MODE_CODED = 0;
 export const MODE_STORED = 1;
 export const MODE_PRIOR = 2;
 const U32_BYTES = 4;
-/** An unpacker refuses a header that claims more than this many original bytes per packed byte. */
-const EXPANSION_MAX = 65536;
+const MB = 1024 * 1024;
+/**
+ * The largest original a coded file may claim: 256 MB, about 50 times the largest real replay (5 MB). The
+ * unpacker refuses a bigger claim before it allocates anything, so a crafted file cannot exhaust memory. The
+ * packer stores a bigger input as it is instead of coding it, so every file it writes can be unpacked.
+ */
+export const MAX_ORIGINAL_BYTES = 256 * MB;
+/**
+ * The most original bytes a coded file may claim per packed byte. Real replays reach about 15; 1024 leaves wide
+ * room. Same rule as above: the unpacker refuses more, the packer stores rather than write more.
+ */
+export const EXPANSION_MAX = 1024;
 /** magic + version + predictor set + mode */
 const FIXED_BYTES = MAGIC_BYTES + 3;
 const BITS_PER_BYTE = 8;
@@ -119,22 +129,32 @@ export function packReplay(src: Uint8Array, opts: PackOptions = {}): PackResult 
   const predictors = opts.gameAware !== false && knowsGameVersion(src) ? PREDICTORS_PAC_MINIGAME : PREDICTORS_SCHEMA;
   let prior = opts.prior != null && (opts.priorAlways === true || priorKnows(opts.prior, src)) ? opts.prior : null;
   const codecOptions = { gameAware: predictors === PREDICTORS_PAC_MINIGAME, account: opts.account === true, rawLen: src.length };
-  let codec: Codec;
+  let codec: Codec | null = null;
   let body: Uint8Array | null = null;
   let error: string | null = null;
-  try {
-    codec = new Codec(src, true, { ...codecOptions, prior });
-  } catch (e) {
-    // a starting model made for another build of the coder: pack cold and say so, never fail
-    error = e instanceof Error ? e.message : String(e);
-    prior = null;
-    codec = new Codec(src, true, { ...codecOptions, prior });
-  }
-  try {
-    body = codec.encode();
-  } catch (e) {
-    // a bug in the coder must never cost a replay: the file is stored as it is, and the caller is told why
-    error = e instanceof Error ? e.message : String(e);
+  if (src.length > MAX_ORIGINAL_BYTES) {
+    // the unpacker refuses a coded file this large, so it is stored as it is
+    error = `larger than ${MAX_ORIGINAL_BYTES} bytes, stored as it is`;
+  } else {
+    try {
+      codec = new Codec(src, true, { ...codecOptions, prior });
+    } catch (e) {
+      // a starting model made for another build of the coder: pack cold and say so, never fail
+      error = e instanceof Error ? e.message : String(e);
+      prior = null;
+      codec = new Codec(src, true, { ...codecOptions, prior });
+    }
+    try {
+      body = codec.encode();
+    } catch (e) {
+      // a bug in the coder must never cost a replay: the file is stored as it is, and the caller is told why
+      error = e instanceof Error ? e.message : String(e);
+    }
+    if (body !== null && src.length > (body.length + 1) * EXPANSION_MAX) {
+      // shrinks more than the unpacker accepts: store it, so the file can always be unpacked
+      error = `shrinks more than ${EXPANSION_MAX} to 1, stored as it is`;
+      body = null;
+    }
   }
   const stored = body === null || body.length >= src.length;
   const payload = stored ? src : (body as Uint8Array);
@@ -152,7 +172,7 @@ export function packReplay(src: Uint8Array, opts: PackOptions = {}): PackResult 
   const bytes = new Uint8Array(head.length + payload.length);
   bytes.set(head);
   bytes.set(payload, head.length);
-  return { bytes, predictors: stored ? PREDICTORS_SCHEMA : predictors, mode, priorId: mode === MODE_PRIOR ? (prior as Prior).id : 0, stats: stored ? null : codec.stats, codec: stored ? null : codec, error };
+  return { bytes, predictors: stored ? PREDICTORS_SCHEMA : predictors, mode, priorId: mode === MODE_PRIOR ? (prior as Prior).id : 0, stats: stored || codec === null ? null : codec.stats, codec: stored ? null : codec, error };
 }
 
 /**
@@ -207,12 +227,14 @@ export function unpackReplay(packed: Uint8Array, priors: readonly Prior[] = []):
   const crc = u32At(packed, p);
   p += U32_BYTES;
   const body = packed.subarray(p);
-  if (rawLen > (body.length + 1) * EXPANSION_MAX) throw new Error('CLRZ header is damaged');
   let out: Uint8Array;
   if (mode === MODE_STORED) {
+    // a stored body is the original itself, so its size claim cannot make the unpacker allocate more than the file
     if (body.length !== rawLen) throw new Error('packed data is damaged');
     out = body.slice();
   } else {
+    // checked before the coder allocates rawLen bytes: a crafted header must not exhaust memory
+    if (rawLen > MAX_ORIGINAL_BYTES || rawLen > (body.length + 1) * EXPANSION_MAX) throw new Error('CLRZ header is damaged');
     out = new Codec(body, false, { gameAware: predictors === PREDICTORS_PAC_MINIGAME, account: false, rawLen, prior }).decode();
   }
   if (crc32(out) !== crc) throw new Error('packed data is damaged (crc32 mismatch)');
