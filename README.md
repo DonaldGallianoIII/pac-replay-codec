@@ -9,7 +9,7 @@ best 12.4x.
 
 Two ways to use it:
 
-1. **In the browser:** <https://donaldgallianoiii.github.io/pac-replay-codec/>. Drop replays (or a whole folder)
+1. **In the browser:** <https://crawdata.ai/paczd>. Drop replays (or a whole folder)
    on the page, get `.paczd` files back. Drop a `.paczd` and you get the original. It runs in your browser and
    nothing is uploaded. Good for a handful of games up to a few hundred.
 2. **In a terminal, for bulk:** one command packs every replay in a folder and its subfolders, on all your cores,
@@ -105,7 +105,7 @@ So nobody has to try them again.
 
 ### The page
 
-Hosted at <https://donaldgallianoiii.github.io/pac-replay-codec/>. To run it yourself, serve the `web/` folder
+Hosted at <https://crawdata.ai/paczd>. To run it yourself, serve the `web/` folder
 (module workers do not load from `file://`):
 
 ```sh
