@@ -206,7 +206,7 @@ The repository holds no recorded games. The tests run on two small synthetic rep
 by `test/make-synthetic.cjs` from Colyseus's own encoder (schema 4 and 5) with a made-up schema that is not a game.
 
 ```sh
-node --test test/*.test.ts                                   # 26 tests, a few seconds
+node --test test/*.test.ts                                   # 41 tests (3 skip without real replays), a few seconds
 REPLAY_DIR=~/my-replays node --test test/codec.test.ts       # plus 3 that run on your own .colreplay files
 ```
 
