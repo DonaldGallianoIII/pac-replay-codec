@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- connect-src 'none' blocks connections from this page. The policy covers the page; its workers get theirs from
+       the server, and none of the page's code makes a network request. The codec runs in this tab. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>PAC Replay Codec</title>
+  <meta name="description" content="Pack Pokemon Auto Chess replays up to 12.4 times smaller and get every byte back. Smaller files compress slightly worse. Runs in your browser.">
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#drop">Skip to the drop area</a>
+  <header class="top">
+    <div class="brand">
+      <h1>PAC Replay Codec</h1>
+      <p class="tagline">Lossless. Up to 12.4× smaller*. Every byte back.</p>
+      <p class="footnote">*Smaller files compress slightly worse.</p>
+    </div>
+  </header>
+
+  <main>
+    <section id="hero" class="hero"></section>
+
+    <label id="drop" class="drop" for="file-input" tabindex="-1">
+      <span class="drop-title">Drop replays here</span>
+      <span class="drop-hint">Files or whole folders</span>
+      <span class="drop-lines">
+        <span><b>.colreplay</b> → packed <b>.paczd</b></span>
+        <span><b>.paczd</b> → the original back</span>
+      </span>
+      <span class="btn btn-primary drop-btn" aria-hidden="true">Choose files</span>
+      <input id="file-input" class="sr-only" type="file" multiple accept=".colreplay,.paczd,.clrz,application/octet-stream">
+    </label>
+
+    <p class="local">
+      <span class="local-icon" aria-hidden="true">⌂</span>
+      <span><b>Runs in this tab. Nothing is uploaded.</b> This page and its code make no network requests, and the
+      page's security policy blocks connections from it. The codec is plain JavaScript loaded with the page.</span>
+    </p>
+
+    <p id="announce" class="sr-only" aria-live="polite"></p>
+    <section id="progress" class="progress" hidden></section>
+    <section id="actions" class="actions" hidden></section>
+    <section id="chart" class="chart card" hidden></section>
+    <ol id="list" class="list" aria-label="Files"></ol>
+
+    <section class="folds">
+      <details>
+        <summary>What "exact" means here</summary>
+        <p>A packed file holds the size and the crc32 checksum of the original. Unpacking rebuilds the replay and
+        checks both before it hands you anything. A damaged file fails with a message instead of coming back wrong.</p>
+        <p>When you pack, this page also unpacks the result right away and compares it with your original, byte for
+        byte, before it offers the download.</p>
+      </details>
+      <details>
+        <summary>How it gets so small</summary>
+        <p>A replay is a recording of a Colyseus game state, one patch per tick. The codec reads the game's own type
+        table from the start of the file, then walks every field and predicts it from what came before: the same
+        field on earlier ticks, the strings seen so far, and the game's own formulas for the carousel and portals.
+        An adaptive binary range coder writes only the surprise. The decoder runs the same model in reverse.</p>
+      </details>
+      <details>
+        <summary>Thousands of replays? Use the command line</summary>
+        <p>This page is good for a handful of games up to a few hundred. For a big folder, the command line tool
+        packs every replay in it and its subfolders on all your cores, and checks each one byte for byte. It needs
+        Node 22.18 or newer, nothing else:</p>
+        <p><code>npx github:DonaldGallianoIII/pac-replay-codec pack ./replays</code></p>
+        <p>Unpack with <code>unpack</code>, check with <code>verify</code>, add <code>--json</code> for scripts and AI
+        agents. Full guide in the
+          <a href="https://github.com/DonaldGallianoIII/pac-replay-codec#command-line-and-ai-agents" rel="noopener noreferrer">README</a>.</p>
+      </details>
+      <details>
+        <summary>Costs and limits</summary>
+        <ul>
+          <li><b>CPU.</b> About 0.3 s to pack and 0.2 s to unpack one 3.4 MB replay. zstd is faster; it copies,
+          this models.</li>
+          <li><b>Whole file only.</b> There is no seeking into the middle of a packed replay.</li>
+          <li><b>Game versions.</b> Measured on 6.11 replays. The codec reads the type table from each file, so newer
+          versions should pack; v7 replays are not yet tested.</li>
+          <li><b>Not a replay?</b> It is kept as it was inside the container, so it still comes back exact.</li>
+        </ul>
+      </details>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>Free software under GPL-3.0. Built for replays of
+      <a href="https://github.com/keldaanCommunity/pokemonAutoChess" rel="noopener noreferrer">Pokemon Auto Chess</a>,
+      whose game code the PAC-aware layer is derived from. Not affiliated with the game.
+      Source: <a href="https://github.com/DonaldGallianoIII/pac-replay-codec" rel="noopener noreferrer">GitHub</a>.</p>
+  </footer>
+</body>
+</html>
