@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1
+
+- **Other game versions keep the mini-game formulas when they still fit.** A replay whose game version is not
+  6.11.x (v7 writes `"version":"6.11"` with no patch number) used to be packed with the schema alone. It is now
+  coded both ways and the smaller is kept; if the formulas throw on it, the schema pass is used. On 10 sample
+  6.11 replays relabelled `"6.11"`: 11.54x instead of 9.18x, and packing takes about twice as long.
+- 6.11.x replays pack to the same bytes as 1.0.0 (one pass, formulas on). No format change: the predictor set was
+  already in the header, so 1.0.0 unpacks files from 1.0.1 and the other way round.
+
 ## 1.0.0
 
 First public release.

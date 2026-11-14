@@ -79,8 +79,9 @@
           <li><b>CPU.</b> About 0.3 s to pack and 0.2 s to unpack one 3.4 MB replay. zstd is faster; it copies,
           this models.</li>
           <li><b>Whole file only.</b> There is no seeking into the middle of a packed replay.</li>
-          <li><b>Game versions.</b> Measured on 6.11 replays. The codec reads the type table from each file, so newer
-          versions should pack; v7 replays are not yet tested.</li>
+          <li><b>Game versions.</b> Measured on 6.11 replays. The codec reads the type table from each file, so other
+          versions pack exactly. A version it does not name, v7 included, is packed with and without the 6.11
+          formulas and keeps the smaller, which takes about twice as long. Real v7 replays are not yet tested.</li>
           <li><b>Not a replay?</b> It is kept as it was inside the container, so it still comes back exact.</li>
         </ul>
       </details>

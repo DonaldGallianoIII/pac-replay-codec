@@ -8,7 +8,7 @@
  * Container (little endian, varint = unsigned LEB128):
  *   "CLRZ" | u8 format version = 1 | u8 predictor set | u8 mode | [u32 prior id] | varint rawLen |
  *   u32 crc32(original) | body
- *   predictor set  0 = schema only, 1 = schema + PAC mini-game 6.11 formulas (see GAME_VERSION_MARK)
+ *   predictor set  0 = schema only, 1 = schema + PAC mini-game 6.11 formulas (see GAME_VERSION_MARKS)
  *   mode           0 = coded (body is the range-coded replay), 1 = stored (body is the original bytes),
  *                  2 = coded from a starting model: the u32 prior id follows the mode byte, and the unpacker
  *                  needs that exact prior (prior.ts)
@@ -18,9 +18,9 @@
  * damaged file, or a build whose model drifted from the one that packed it, fails loudly and is never returned.
  *
  * The codec reads the type table from the replay's own handshake, so it follows schema changes between game
- * versions by itself. Only the mini-game formulas are tied to a game version: they are used when the replay's
- * meta block names a version this build knows, and the choice is written in the header so the unpacker never has
- * to guess.
+ * versions by itself. Only the mini-game formulas are tied to a game version: a 6.11.x replay uses them, a replay
+ * of any other version is coded with and without them and keeps the smaller, and the choice is written in the
+ * header so the unpacker never has to guess.
  *
  * @interacts codec.ts (the coder), clrp.ts (header layout), prior.ts (the starting model file), crc32.ts
  * @deps      codec.ts, clrp.ts, prior.ts, crc32.ts
@@ -65,13 +65,14 @@ const BITS_PER_BYTE = 8;
 
 /**
  * The game versions whose mini-game formulas this build knows, as the exact text PAC's recorder writes at the
- * start of the meta block's "game" object. Any other version (older, newer, or a recorder that orders its keys
- * differently) is packed with the schema alone.
+ * start of the meta block's "game" object. Any other version (older, newer, v7's "6.11" with no patch number, or a
+ * recorder that orders its keys differently) is coded both ways and keeps the smaller (codeEitherWay).
  */
 const GAME_VERSION_MARKS = ['"game":{"version":"6.11.'];
 
 /**
- * True when the replay's meta block names a game version whose mini-game formulas this build knows.
+ * True when the replay's meta block names a game version whose mini-game formulas this build knows: such a replay
+ * is coded once, with them.
  * @complexity O(meta block) @alloc none
  */
 export function knowsGameVersion(src            )          {
@@ -118,49 +119,101 @@ export function knowsGameVersion(src            )          {
                        
  
 
+/** One coding pass with one predictor set: the coder, its body (null when it failed or declined), and why. */
+                   
+                     
+                      
+                      
+                          
+                       
+ 
+
+/**
+ * Code `src` once with one predictor set. A starting model that does not fit this build is dropped (packed cold); a
+ * coder error leaves body null with the reason in error, so the caller stores the file instead of losing it.
+ * @interacts codec.ts @deps codec.ts
+ * @complexity O(file) @alloc the coded body and the coder's tables
+ */
+function codeWith(src            , predictors        , prior              , account         )          {
+  const codecOptions = { gameAware: predictors === PREDICTORS_PAC_MINIGAME, account, rawLen: src.length };
+  let codec       ;
+  let body                    = null;
+  let error                = null;
+  try {
+    codec = new Codec(src, true, { ...codecOptions, prior });
+  } catch (e) {
+    // a starting model made for another build of the coder: pack cold and say so, never fail
+    error = e instanceof Error ? e.message : String(e);
+    prior = null;
+    codec = new Codec(src, true, { ...codecOptions, prior });
+  }
+  try {
+    body = codec.encode();
+  } catch (e) {
+    // a bug in the coder must never cost a replay: the file is stored as it is, and the caller is told why
+    error = e instanceof Error ? e.message : String(e);
+  }
+  if (body !== null && src.length > (body.length + 1) * EXPANSION_MAX) {
+    // shrinks more than the unpacker accepts: store it, so the file can always be unpacked
+    error = `shrinks more than ${EXPANSION_MAX} to 1, stored as it is`;
+    body = null;
+  }
+  return { predictors, prior, codec, body, error };
+}
+
+/**
+ * Pick the predictor set for a replay whose game version this build does not name (a newer or older PAC, or v7,
+ * whose recorder writes "version":"6.11" with no patch number). The mini-game formulas may or may not still fit,
+ * so both sets are tried and the smaller body wins; a tie keeps the schema set. When the formulas throw on this
+ * input, the schema pass stands on its own.
+ * @interacts codeWith @deps codec.ts
+ * @complexity O(file) twice @alloc both bodies and both coders' tables, for the length of the call
+ */
+function codeEitherWay(src            , prior              , account         )          {
+  const schema = codeWith(src, PREDICTORS_SCHEMA, prior, account);
+  let game                 = null;
+  try {
+    game = codeWith(src, PREDICTORS_PAC_MINIGAME, prior, account);
+  } catch {
+    game = null;
+  }
+  if (game === null || game.body === null) return schema;
+  if (schema.body === null || game.body.length < schema.body.length) return game;
+  return schema;
+}
+
 /**
  * Pack a replay. Any input packs: one that is not a replay, or that would not shrink, is stored as it is. A
  * starting model is used only when it knows the replay's type table (or when forced); a replay it does not know
  * is packed cold, exactly as without it.
+ *
+ * Predictor set: 6.11.x replays (knowsGameVersion) use the mini-game formulas, one pass. Any other replay is coded
+ * both ways and keeps the smaller (codeEitherWay). gameAware: false forces the schema set, one pass.
  * @interacts codec.ts @deps codec.ts
- * @complexity O(file) @alloc the packed bytes and the coder's tables
+ * @complexity O(file); two coding passes for a replay of a game version this build does not name
+ * @alloc the packed bytes and the coder's tables (two of each, briefly, on the two-pass path)
  */
 export function packReplay(src            , opts              = {})             {
-  const predictors = opts.gameAware !== false && knowsGameVersion(src) ? PREDICTORS_PAC_MINIGAME : PREDICTORS_SCHEMA;
-  let prior = opts.prior != null && (opts.priorAlways === true || priorKnows(opts.prior, src)) ? opts.prior : null;
-  const codecOptions = { gameAware: predictors === PREDICTORS_PAC_MINIGAME, account: opts.account === true, rawLen: src.length };
-  let codec               = null;
-  let body                    = null;
-  let error                = null;
+  const prior = opts.prior != null && (opts.priorAlways === true || priorKnows(opts.prior, src)) ? opts.prior : null;
+  const account = opts.account === true;
+  let attempt         ;
   if (src.length > MAX_ORIGINAL_BYTES) {
     // the unpacker refuses a coded file this large, so it is stored as it is
-    error = `larger than ${MAX_ORIGINAL_BYTES} bytes, stored as it is`;
+    attempt = { predictors: PREDICTORS_SCHEMA, prior: null, codec: null, body: null, error: `larger than ${MAX_ORIGINAL_BYTES} bytes, stored as it is` };
+  } else if (opts.gameAware === false || !hasHeader(src)) {
+    attempt = codeWith(src, PREDICTORS_SCHEMA, prior, account);
+  } else if (knowsGameVersion(src)) {
+    attempt = codeWith(src, PREDICTORS_PAC_MINIGAME, prior, account);
   } else {
-    try {
-      codec = new Codec(src, true, { ...codecOptions, prior });
-    } catch (e) {
-      // a starting model made for another build of the coder: pack cold and say so, never fail
-      error = e instanceof Error ? e.message : String(e);
-      prior = null;
-      codec = new Codec(src, true, { ...codecOptions, prior });
-    }
-    try {
-      body = codec.encode();
-    } catch (e) {
-      // a bug in the coder must never cost a replay: the file is stored as it is, and the caller is told why
-      error = e instanceof Error ? e.message : String(e);
-    }
-    if (body !== null && src.length > (body.length + 1) * EXPANSION_MAX) {
-      // shrinks more than the unpacker accepts: store it, so the file can always be unpacked
-      error = `shrinks more than ${EXPANSION_MAX} to 1, stored as it is`;
-      body = null;
-    }
+    attempt = codeEitherWay(src, prior, account);
   }
+  const { predictors, codec, body, error } = attempt;
   const stored = body === null || body.length >= src.length;
+  const used = stored ? null : attempt.prior;
   const payload = stored ? src : (body              );
-  const mode = stored ? MODE_STORED : prior !== null ? MODE_PRIOR : MODE_CODED;
+  const mode = stored ? MODE_STORED : used !== null ? MODE_PRIOR : MODE_CODED;
   const head           = [...CONTAINER_MAGIC, FORMAT_VERSION, stored ? PREDICTORS_SCHEMA : predictors, mode];
-  if (mode === MODE_PRIOR) for (let i = 0; i < U32_BYTES; i++) head.push(((prior         ).id >>> (i * BITS_PER_BYTE)) & 0xff);
+  if (mode === MODE_PRIOR) for (let i = 0; i < U32_BYTES; i++) head.push(((used         ).id >>> (i * BITS_PER_BYTE)) & 0xff);
   let v = src.length;
   while (v >= VARINT_BASE) {
     head.push((v % VARINT_BASE) | VARINT_CONTINUE);
@@ -172,7 +225,7 @@ export function packReplay(src            , opts              = {})             
   const bytes = new Uint8Array(head.length + payload.length);
   bytes.set(head);
   bytes.set(payload, head.length);
-  return { bytes, predictors: stored ? PREDICTORS_SCHEMA : predictors, mode, priorId: mode === MODE_PRIOR ? (prior         ).id : 0, stats: stored || codec === null ? null : codec.stats, codec: stored ? null : codec, error };
+  return { bytes, predictors: stored ? PREDICTORS_SCHEMA : predictors, mode, priorId: mode === MODE_PRIOR ? (used         ).id : 0, stats: stored || codec === null ? null : codec.stats, codec: stored ? null : codec, error };
 }
 
 /**

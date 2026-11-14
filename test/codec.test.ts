@@ -9,10 +9,11 @@
  *   node --test test/codec.test.ts
  *   REPLAY_DIR=~/my-replays node --test test/codec.test.ts
  *
- * @interacts reads test/fixtures/ and, when set, the .colreplay files in REPLAY_DIR; writes nothing
- * @deps      src/index.ts, src/trig.ts, node:test
+ * @interacts reads test/fixtures/ and, when set, the .colreplay files in REPLAY_DIR; writes nothing. One test
+ *            swaps Codec.prototype.encode for the length of the test and puts it back.
+ * @deps      src/index.ts, src/codec.ts, src/clrp.ts, src/trig.ts, node:test
  * @complexity about 30 pack and unpack calls on the 20 KB fixtures; with REPLAY_DIR, 4 per replay (R replays, up
- *            to REPLAY_LIMIT) of up to 5 MB each
+ *            to REPLAY_LIMIT) of up to 5 MB each; the relabelled cases code each file with both predictor sets
  * @alloc     one replay and its packed and unpacked forms at a time
  * @rng       seeded LCG for the damaged cases (DamageSeed), so every run tests the same bytes
  */
@@ -22,7 +23,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
-import { packReplay, unpackReplay, crc32, MODE_CODED, MODE_STORED, PREDICTORS_SCHEMA, PREDICTORS_PAC_MINIGAME } from '../src/index.ts';
+import { packReplay, unpackReplay, crc32, knowsGameVersion, MODE_CODED, MODE_STORED, PREDICTORS_SCHEMA, PREDICTORS_PAC_MINIGAME } from '../src/index.ts';
+import { Codec } from '../src/codec.ts';
+import { HEADER_FIXED_BYTES, MAGIC_BYTES, u32At } from '../src/clrp.ts';
 import { detSin, detCos } from '../src/trig.ts';
 
 const FIXTURES = path.join(import.meta.dirname, 'fixtures');
@@ -68,6 +71,81 @@ test('self-describing: replays from a schema that is not PAC, Colyseus schema 4 
     assert.equal(packed.predictors, PREDICTORS_SCHEMA, 'an unknown game version never gets the PAC formulas');
     assert.equal(packed.stats?.rawFrames, 0, 'every frame is walked with the type table from the file');
     assert.ok(packed.bytes.length * 3 < src.length);
+  }
+});
+
+const GAME_VERSION_KEY = '"game":{"version":"';
+
+/**
+ * A copy of a replay whose meta block names another game version: the text after "game":{"version":" up to the
+ * next quote is replaced and the u32 meta length in the CLRP header is rewritten to match.
+ */
+function relabel(src: Uint8Array, version: string): Uint8Array {
+  const metaEnd = HEADER_FIXED_BYTES + u32At(src, MAGIC_BYTES + 1);
+  const meta = Buffer.from(src.subarray(HEADER_FIXED_BYTES, metaEnd)).toString('latin1');
+  const at = meta.indexOf(GAME_VERSION_KEY);
+  assert.ok(at >= 0, 'the replay names a game version');
+  const from = at + GAME_VERSION_KEY.length;
+  const next = Buffer.from(meta.slice(0, from) + version + meta.slice(meta.indexOf('"', from)), 'latin1');
+  const out = Buffer.alloc(HEADER_FIXED_BYTES + next.length + src.length - metaEnd);
+  out.set(src.subarray(0, HEADER_FIXED_BYTES));
+  out.writeUInt32LE(next.length, MAGIC_BYTES + 1);
+  out.set(next, HEADER_FIXED_BYTES);
+  out.set(src.subarray(metaEnd), HEADER_FIXED_BYTES + next.length);
+  return out;
+}
+
+/** The coded body of `src` with one predictor set, straight from the coder. */
+const bodyWith = (src: Uint8Array, gameAware: boolean): Uint8Array =>
+  new Codec(src, true, { gameAware, account: false, rawLen: src.length, prior: null }).encode() as Uint8Array;
+
+/** Pack `src`, check it round trips, and check the packer kept the smaller of the two predictor sets (tie: schema). */
+function packsTheSmaller(src: Uint8Array, label: string) {
+  assert.equal(knowsGameVersion(src), false, `${label}: not a version this build names`);
+  const packed = roundTrip(src);
+  const schema = bodyWith(src, false);
+  const game = bodyWith(src, true);
+  const want = game.length < schema.length ? PREDICTORS_PAC_MINIGAME : PREDICTORS_SCHEMA;
+  const body = want === PREDICTORS_PAC_MINIGAME ? game : schema;
+  assert.equal(packed.mode, MODE_CODED, `${label} is coded`);
+  assert.equal(packed.predictors, want, `${label}: schema ${schema.length} B, formulas ${game.length} B`);
+  assert.deepEqual(packed.bytes.subarray(packed.bytes.length - body.length), body, `${label}: the body is that set's`);
+  return { packed, schema, game };
+}
+
+test('unknown game versions ("6.11" as v7 writes it, "7.0.0"): both sets tried, the smaller kept, exact round trip', () => {
+  for (const file of SYNTHETIC) {
+    const src = new Uint8Array(fs.readFileSync(file));
+    for (const version of ['6.11', '7.0.0']) packsTheSmaller(relabel(src, version), `${path.basename(file)} as ${version}`);
+  }
+});
+
+test('a 6.11.x replay takes the formulas in one pass, and gameAware: false takes the schema', () => {
+  const src = relabel(new Uint8Array(fs.readFileSync(SYNTHETIC[1])), '6.11.2');
+  assert.equal(knowsGameVersion(src), true);
+  assert.equal(roundTrip(src).predictors, PREDICTORS_PAC_MINIGAME);
+  assert.equal(roundTrip(relabel(src, '7.0.0'), false).predictors, PREDICTORS_SCHEMA);
+});
+
+test('the formulas throwing on an unknown version falls back to the schema set; on 6.11.x the file is stored as before', () => {
+  const real = Codec.prototype.encode;
+  Codec.prototype.encode = function (this: Codec) {
+    if (Reflect.get(this, 'gameAware') === true) throw new Error('formula pass failed (test)');
+    return real.call(this);
+  };
+  try {
+    const src = new Uint8Array(fs.readFileSync(SYNTHETIC[1]));
+    for (const version of ['6.11', '7.0.0']) {
+      const packed = roundTrip(relabel(src, version));
+      assert.equal(packed.mode, MODE_CODED, `${version}: still coded`);
+      assert.equal(packed.predictors, PREDICTORS_SCHEMA, `${version}: schema set`);
+      assert.equal(packed.error, null, `${version}: a clean fallback`);
+    }
+    const known = roundTrip(relabel(src, '6.11.2'));
+    assert.equal(known.mode, MODE_STORED, '6.11.x keeps one pass: a coder error stores the file');
+    assert.match(known.error ?? '', /formula pass failed/);
+  } finally {
+    Codec.prototype.encode = real;
   }
 });
 
@@ -160,14 +238,17 @@ test('your replays: each one round trips, game-aware and schema-only', { skip: N
   }
 });
 
-test('your replays: a 6.11 replay relabelled 7.00 packs with the schema alone and still round trips', { skip: NEEDS_REPLAYS }, (t) => {
-  const src = Buffer.from(fs.readFileSync(REPLAYS[0]));
-  const at = src.indexOf('"version":"6.11.');
-  if (at < 0) { t.skip('the first replay in REPLAY_DIR is not from game version 6.11'); return; }
-  src.write('7.00', at + '"version":"'.length);
-  const packed = roundTrip(src);
-  assert.equal(packed.predictors, PREDICTORS_SCHEMA);
-  assert.equal(packed.stats?.rawFrames, 0);
+test('your replays: a 6.11.2 replay relabelled "6.11" and "7.0.0" keeps the smaller set and round trips', { skip: NEEDS_REPLAYS }, (t) => {
+  const src = new Uint8Array(fs.readFileSync(REPLAYS[0]));
+  if (!knowsGameVersion(src)) { t.skip('the first replay in REPLAY_DIR is not from game version 6.11.x'); return; }
+  const known = packReplay(src).bytes.length;
+  for (const version of ['6.11', '7.0.0']) {
+    const { packed } = packsTheSmaller(relabel(src, version), version);
+    assert.equal(packed.stats?.rawFrames, 0);
+    // a 6.11 game under another label still fits the formulas: the two-pass path must find them
+    assert.equal(packed.predictors, PREDICTORS_PAC_MINIGAME, `${version}: the formulas win on a 6.11 game`);
+    assert.ok(Math.abs(packed.bytes.length - known) < known / 100, `${version}: within 1% of the 6.11.2 size`);
+  }
 });
 
 test('your replays: damaged copies of one come back bit for bit', { skip: NEEDS_REPLAYS }, () => {

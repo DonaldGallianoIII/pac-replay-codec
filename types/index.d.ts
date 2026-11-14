@@ -78,7 +78,10 @@ export function packReplay(src: Uint8Array, opts?: PackOptions): PackResult;
  */
 export function unpackReplay(packed: Uint8Array, priors?: readonly Prior[]): Uint8Array;
 
-/** True when this build knows the PAC mini-game formulas for the replay's game version. */
+/**
+ * True when this build knows the PAC mini-game formulas for the replay's game version (6.11.x). packReplay codes
+ * such a replay once, with them; any other replay is coded with and without them and keeps the smaller.
+ */
 export function knowsGameVersion(src: Uint8Array): boolean;
 
 /** Read a starting model file. Throws if the file is damaged. */

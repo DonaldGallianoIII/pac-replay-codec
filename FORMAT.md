@@ -35,8 +35,10 @@ stores an input that would break either limit, so every file it writes can be un
 the original and checks its length and crc32 before returning it. A damaged file throws; it is never returned
 wrong.
 
-The packer writes predictor set 1 only when the replay's meta block names a game version this build knows
-(`"game":{"version":"6.11.`). The choice is in the header, so the unpacker never guesses.
+A replay whose meta block names a game version this build knows (`"game":{"version":"6.11.`) is coded once,
+with predictor set 1. Any other replay (a newer or older PAC, or v7, whose recorder writes `"version":"6.11"` with
+no patch number) is coded with set 0 and with set 1, and the smaller is written; a tie keeps set 0, and a set 1
+pass that throws leaves set 0. The choice is in the header, so the unpacker never guesses.
 
 Mode 2 is written only when the caller passes a starting model to `packReplay`, and none ships with this codec.
 The slot is there so one can be added later without a new version byte; files packed without one stay valid.

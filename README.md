@@ -95,9 +95,10 @@ So nobody has to try them again.
    about 70 times. Unpacking has to replay the whole model; zstd only copies bytes. For one replay that is still
    a fraction of a second.
 2. **No random access.** You unpack the whole file. A replay viewer reads the whole file anyway.
-3. **Game versions.** Measured on 6.11 replays. The type table is read from each file, so later versions with
-   new fields should pack exactly; they lose the mini-game formulas and come out about 20% larger until a build
-   knows them. Replays from v7 are not yet tested.
+3. **Game versions.** Measured on 6.11 replays. The type table is read from each file, so other versions pack
+   exactly. A 6.11.x replay is coded once, with the mini-game formulas. Any other version (v7 writes "6.11" with
+   no patch number) is coded with and without them and keeps the smaller, so packing takes about twice as long.
+   Real v7 replays are not yet tested; 6.11 replays relabelled as v7 pack to the same size as before.
 4. **The format is tied to the model.** A change to the model needs a new format version byte, and a build must
    keep the old one to read old files.
 
@@ -201,7 +202,7 @@ The repository holds no recorded games. The tests run on two small synthetic rep
 by `test/make-synthetic.cjs` from Colyseus's own encoder (schema 4 and 5) with a made-up schema that is not a game.
 
 ```sh
-node --test test/*.test.ts                                   # 41 tests (3 skip without real replays), a few seconds
+node --test test/*.test.ts                                   # 44 tests (3 skip without real replays), a few seconds
 REPLAY_DIR=~/my-replays node --test test/codec.test.ts       # plus 3 that run on your own .colreplay files
 ```
 
