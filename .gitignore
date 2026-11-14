@@ -8,3 +8,4 @@ node_modules/
 test/fixtures/local/
 # the synthetic test fixtures are made from a schema that is not a game; they hold no recorded play
 !test/fixtures/synthetic-*.colreplay
+*.tgz

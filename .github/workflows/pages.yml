@@ -1,0 +1,38 @@
+# Publishes web/ as the GitHub Pages site, so the page is served at https://<owner>.github.io/pac-replay-codec/.
+# Turn it on once in the repository settings: Pages, Source, "GitHub Actions".
+# The page uses relative paths only, so it works from that subpath as it is.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Tests, including the check that web/lib matches src
+        run: node --test test/*.test.ts
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

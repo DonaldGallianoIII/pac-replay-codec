@@ -7,8 +7,12 @@ checked by size and crc32 before anything is returned.
 \*Smaller files compress slightly worse. On 100 sample replays, packed one by one: worst 10.2x, median 11.4x,
 best 12.4x.
 
-Open `web/index.html` (served, see below), drop replays on it, get `.clrz` files back. Drop a `.clrz` and you get
-the original. It runs in your browser and nothing is uploaded.
+Two ways to use it:
+
+1. **In the browser:** <https://donaldgallianoiii.github.io/pac-replay-codec/>. Drop replays on the page, get
+   `.clrz` files back. Drop a `.clrz` and you get the original. It runs in your browser and nothing is uploaded.
+2. **In a terminal:** `npx pac-replay-codec pack ./replays` packs every replay in a folder. Needs Node 22.18 or
+   newer, nothing else.
 
 ![Size per replay by compressor, bars from zero. This codec is 11.2x, the best generic compressor is 4.0x.](docs/compressors.svg)
 
@@ -96,25 +100,30 @@ So nobody has to try them again.
 
 ### The page
 
-Module workers do not load from `file://`, so serve the folder:
+Hosted at <https://donaldgallianoiii.github.io/pac-replay-codec/>. To run it yourself, serve the `web/` folder
+(module workers do not load from `file://`):
 
 ```sh
 python3 -m http.server 8000 --bind 127.0.0.1 --directory web
 ```
 
-`web/lib/` is `src/` with the types stripped. After you change `src/`, run `node tools/build-web.mjs` to rebuild
-it (Node's own type stripper, nothing to install).
+Then open <http://127.0.0.1:8000/>. Any static file server works, at the root or under a subpath; every path in
+the page is relative. The page's content security policy blocks every network connection, so it cannot send your
+files anywhere even if it wanted to.
 
-Then open <http://127.0.0.1:8000/>. Any static file server works. The page's content security policy blocks
-every network connection, so it cannot send your files anywhere even if it wanted to.
+`web/lib/` is `src/` with the types stripped. After you change `src/`, run `node tools/build-web.mjs` to rebuild
+it (Node's own type stripper, nothing to install). A test fails if you forget.
 
 ### The library
 
-Plain TypeScript, no dependencies, no Node-only calls in `src/`. Node 22.18 or newer runs the `.ts` files
-directly.
+No dependencies and no Node-only calls, so it runs in Node and in browsers. From npm:
 
-```ts
-import { packReplay, unpackReplay } from './src/index.ts';
+```sh
+npm install pac-replay-codec
+```
+
+```js
+import { packReplay, unpackReplay } from 'pac-replay-codec';
 
 const packed = packReplay(originalBytes).bytes;   // Uint8Array in, Uint8Array out ("CLRZ" container)
 const original = unpackReplay(packed);            // throws if the packed bytes are damaged
@@ -124,18 +133,23 @@ const original = unpackReplay(packed);            // throws if the packed bytes 
 container. `unpackReplay` checks the size and the crc32 of what it rebuilt. It returns the original or throws.
 It never returns something else.
 
+The npm package is plain JavaScript (`web/lib/`). From a clone you can also import the TypeScript source,
+`./src/index.ts`, which Node 22.18 or newer runs directly.
+
 ### Command line and AI agents
 
-`cli/pac-replay-codec.mjs` packs, unpacks and verifies many replays at once. Plain Node 22.18 or newer, no
-install step, no dependencies. From a clone:
+`pac-replay-codec` packs, unpacks and verifies many replays at once. Node 22.18 or newer, no other
+dependencies.
 
 ```sh
-node cli/pac-replay-codec.mjs pack ~/replays                      # every .colreplay under ~/replays, recursively
-node cli/pac-replay-codec.mjs pack ~/replays -o ~/packed --jobs 4
-node cli/pac-replay-codec.mjs unpack ~/packed -o ~/restored
-node cli/pac-replay-codec.mjs verify ~/packed --json
-npx . pack ~/replays                                              # the same, through the package's bin entry
+npx pac-replay-codec pack ./replays                         # every .colreplay under ./replays, recursively
+npx pac-replay-codec pack ./replays -o ./packed --jobs 4
+npx pac-replay-codec unpack ./packed -o ./restored
+npx pac-replay-codec verify ./packed --json
 ```
+
+`npm install -g pac-replay-codec` makes it a plain `pac-replay-codec` command. From a clone, run
+`node cli/pac-replay-codec.mjs` with the same arguments.
 
 What it promises, whatever the flags:
 
@@ -175,7 +189,7 @@ The repository holds no recorded games. The tests run on two small synthetic rep
 by `test/make-synthetic.cjs` from Colyseus's own encoder (schema 4 and 5) with a made-up schema that is not a game.
 
 ```sh
-node --test test/*.test.ts                                   # 25 tests, a few seconds
+node --test test/*.test.ts                                   # 26 tests, a few seconds
 REPLAY_DIR=~/my-replays node --test test/codec.test.ts       # plus 3 that run on your own .colreplay files
 ```
 

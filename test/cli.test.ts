@@ -184,5 +184,5 @@ test('bad usage exits 2 with a message; --help exits 0 with examples', () => {
   }
   const h = run('--help');
   assert.equal(h.code, EXIT.OK);
-  assert.ok(h.lines.some((l) => l.includes('pac-replay-codec pack ~/replays')));
+  assert.ok(h.lines.some((l) => l.includes('npx pac-replay-codec pack ./replays')));
 });

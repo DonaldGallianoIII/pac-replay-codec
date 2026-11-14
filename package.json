@@ -1,32 +1,56 @@
 {
   "name": "pac-replay-codec",
   "version": "1.0.0",
-  "description": "Lossless codec for Pokemon Auto Chess replays: about 11x smaller than the raw file, exact bytes back.",
+  "description": "Lossless codec for Pokemon Auto Chess replays: up to 12.4x smaller than the raw file, exact bytes back. Command line tool and library.",
+  "keywords": [
+    "pokemon-auto-chess",
+    "replay",
+    "colreplay",
+    "colyseus",
+    "compression",
+    "lossless",
+    "range-coder",
+    "codec",
+    "cli"
+  ],
   "license": "GPL-3.0-only",
+  "homepage": "https://github.com/DonaldGallianoIII/pac-replay-codec#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DonaldGallianoIII/pac-replay-codec.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DonaldGallianoIII/pac-replay-codec/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.18"
   },
+  "bin": {
+    "pac-replay-codec": "cli/pac-replay-codec.mjs"
+  },
+  "exports": {
+    ".": "./web/lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cli/",
+    "web/lib/",
+    "README.md",
+    "FORMAT.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test test/*.test.ts",
     "build:web": "node tools/build-web.mjs",
+    "prepack": "node tools/build-web.mjs",
     "chart": "node tools/make-chart.mjs",
-    "serve": "node tools/build-web.mjs && python3 -m http.server 8000 --bind 127.0.0.1 --directory web",
+    "serve": "python3 -m http.server 8000 --bind 127.0.0.1 --directory web",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
-  },
-  "bin": {
-    "pac-replay-codec": "cli/pac-replay-codec.mjs"
-  },
-  "files": [
-    "cli/",
-    "web/",
-    "src/",
-    "README.md",
-    "FORMAT.md",
-    "LICENSE"
-  ]
+  }
 }

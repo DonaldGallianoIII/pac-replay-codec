@@ -27,7 +27,8 @@ const KB = 1024;
 const MB = KB * KB;
 const RATIO_DECIMALS = 2;
 
-const HELP = `pac-replay-codec: pack Pokemon Auto Chess replays about 11x smaller, exact bytes back.
+const HELP = `pac-replay-codec: pack Pokemon Auto Chess replays up to 12.4x smaller, exact bytes back.
+(Smaller files compress slightly worse.)
 
 Usage:
   pac-replay-codec pack   <files or folders> [-o outdir] [--jobs N] [--json]
@@ -58,11 +59,11 @@ Summary line:
 Exit codes: 0 all exact or skipped, 1 some failed, 2 bad usage.
 
 Examples:
-  pac-replay-codec pack ~/replays
-  pac-replay-codec pack ~/replays -o ~/packed --jobs 4
-  pac-replay-codec unpack ~/packed -o ~/restored
-  pac-replay-codec verify ~/packed --json
-  pac-replay-codec pack game1.colreplay game2.colreplay --json | jq -c 'select(.status == "failed")'
+  npx pac-replay-codec pack ./replays
+  npx pac-replay-codec pack ./replays -o ./packed --jobs 4
+  npx pac-replay-codec unpack ./packed -o ./restored
+  npx pac-replay-codec verify ./packed --json
+  npx pac-replay-codec pack game1.colreplay game2.colreplay --json | jq -c 'select(.status == "failed")'
 `;
 
 /** @complexity O(1) */
