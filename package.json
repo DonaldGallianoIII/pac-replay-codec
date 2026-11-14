@@ -1,0 +1,19 @@
+{
+  "name": "pac-replay-codec",
+  "version": "1.0.0",
+  "description": "Lossless codec for Pokemon Auto Chess replays: about 11x smaller than the raw file, exact bytes back.",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "build:web": "node tools/build-web.mjs",
+    "chart": "node tools/make-chart.mjs",
+    "serve": "node tools/build-web.mjs && python3 -m http.server 8000 --bind 127.0.0.1 --directory web",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

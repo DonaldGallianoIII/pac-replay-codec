@@ -1,0 +1,10 @@
+node_modules/
+.venv/
+.env
+*.log
+# replays and packed files never go in the repository
+*.colreplay
+*.clrz
+test/fixtures/local/
+# the synthetic test fixtures are made from a schema that is not a game; they hold no recorded play
+!test/fixtures/synthetic-*.colreplay
