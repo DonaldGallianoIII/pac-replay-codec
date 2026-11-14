@@ -17,8 +17,11 @@ const CONFIG = {
   WORKER_MAX: 4,
   /** Leave one core for the page itself. */
   WORKER_SPARE_CORES: 1,
-  /** Shown before any file is dropped: the measured result on the 10 benchmark replays (see README). */
-  BENCH_RATIO: 11.2,
+  /**
+   * Shown before any file is dropped: the shipped code on 100 sample replays, packed one by one (see README).
+   * The best file sets the headline; the worst and the median sit right under it.
+   */
+  SAMPLE: { best: 12.4, median: 11.4, worst: 10.2, files: 100 },
   PACKED_EXT: '.clrz',
   REPLAY_EXT: '.colreplay',
   THEME_KEY: 'pac-replay-codec.theme',
@@ -272,6 +275,7 @@ function renderHero(t) {
   let big;
   let label;
   let sub;
+  let pre = null;
   if (t.packs > 0) {
     big = ratioText(t.packIn, t.packOut);
     label = 'smaller';
@@ -289,11 +293,18 @@ function renderHero(t) {
     label = t.unpacks === 1 ? 'replay restored' : 'replays restored';
     sub = [el('span', { class: 'kv' }, el('b', { text: formatBytes(t.unpackOut) }), ' rebuilt, size and crc32 checked')];
   } else {
-    big = `${CONFIG.BENCH_RATIO}×`;
+    big = `${CONFIG.SAMPLE.best}×`;
     label = 'smaller';
-    sub = [el('span', { class: 'kv muted', text: 'on the 10 benchmark replays. Drop yours to see your number.' })];
+    pre = 'Up to';
+    label = 'smaller*';
+    sub = [
+      el('span', { class: 'kv' }, 'median ', el('b', { text: `${CONFIG.SAMPLE.median}×` })),
+      el('span', { class: 'kv' }, 'worst ', el('b', { text: `${CONFIG.SAMPLE.worst}×` })),
+      el('span', { class: 'kv muted', text: `on ${CONFIG.SAMPLE.files} sample replays. Drop yours to see your number.` }),
+    ];
   }
   mounts.hero.replaceChildren(
+    pre ? el('div', { class: 'hero-pre', text: pre }) : null,
     el('div', { class: 'hero-line' }, el('span', { class: 'hero-num', text: big }),
       el('span', { class: 'hero-label', text: label })),
     el('div', { class: 'hero-sub' }, sub),

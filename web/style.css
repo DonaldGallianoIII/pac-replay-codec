@@ -107,7 +107,7 @@ b { font-weight: 700; }
   border-bottom: 1px solid var(--rule);
 }
 /* Archivo at 62% to 72% width has a narrow space; open it up so words do not run together. */
-h1, .tagline, .hero-label, .drop-title, .btn, .section-title, summary { word-spacing: 0.18em; }
+h1, .tagline, .hero-pre, .hero-label, .drop-title, .btn, .section-title, summary { word-spacing: 0.18em; }
 
 h1 {
   margin: 0;
@@ -129,6 +129,11 @@ h1 {
 
 /* hero: the one big number */
 .hero { padding: 28px 0 8px; }
+.hero-pre {
+  font: 900 clamp(22px, 5vw, 36px)/1 var(--display); font-stretch: 68%;
+  text-transform: uppercase; color: var(--line); margin-bottom: 6px;
+}
+.footnote { margin: -8px 0 12px; font-size: 12px; color: var(--muted); }
 .hero-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 16px; }
 .hero-num {
   font: 900 clamp(88px, 24vw, 184px)/0.85 var(--display);

@@ -1,8 +1,11 @@
 # PAC Replay Codec
 
-Packs a [Pokemon Auto Chess](https://github.com/keldaanCommunity/pokemonAutoChess) replay about 11 times smaller
-than the raw file and about 3.6 times smaller than zstd -8. Lossless: unpacking gives back the exact bytes, checked
-by size and crc32 before anything is returned.
+Packs a [Pokemon Auto Chess](https://github.com/keldaanCommunity/pokemonAutoChess) replay up to 12.4x smaller
+than the raw file\*, and about 3.6 times smaller than zstd -8. Lossless: unpacking gives back the exact bytes,
+checked by size and crc32 before anything is returned.
+
+\*Smaller files compress slightly worse. On 100 sample replays, packed one by one: worst 10.2x, median 11.4x,
+best 12.4x.
 
 Open `web/index.html` (served, see below), drop replays on it, get `.clrz` files back. Drop a `.clrz` and you get
 the original. It runs in your browser and nothing is uploaded.
@@ -40,9 +43,12 @@ CPU is seconds per GB of raw replay on one thread of a Ryzen 9 7950X3D.
 | Split by field, numbers as change from last, then zstd -19 | 687 | 5.26x | not measured | not measured |
 | **This codec** | **303.9** | **11.24x** | **54.9** | **46.7** |
 
+Across 100 sample replays packed one by one with the shipped code: worst 10.2x, median 11.4x, p90 12.1x, best
+12.4x, 11.4x in aggregate.
+
 Samples: the generic rows are 70 replays (3,611 KB raw per game on average), with dictionaries trained on 30
-other replays. The codec row is a separate set of 10 replays (3.4 MB each, 34.2 MB in all). On a wider check of
-312 replays the codec averaged 11.19x, from 9.77x on the worst file to 15.08x on the best, every one byte exact.
+other replays. The codec row is a separate set of 10 replays (3.4 MB each, 34.2 MB in all). An earlier prototype
+of the codec, on a wider set of 312 replays, averaged 11.19x, from 9.77x to 15.08x, every one byte exact.
 
 Per replay that is about 0.3 s to pack and 0.2 s to unpack in a fresh process, and 0.19 s and 0.16 s once the
 engine has warmed up. Packing one replay holds about 55 MB of memory.
