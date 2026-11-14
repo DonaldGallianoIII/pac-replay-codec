@@ -1,4 +1,8 @@
-# The .clrz format, version 1
+# The .paczd format, version 1
+
+Packed files are named `.paczd`. The first four bytes are still `CLRZ`, the format's working name, and tools
+recognise a packed file by those bytes, not by its name. Files named `.clrz` by pre-release builds are the same
+format and read the same way.
 
 Short version: a small header, then either the original bytes or one range-coded stream. The coded stream has no
 structure of its own that you can parse without the model. Unpacking means running the same model the packer ran.

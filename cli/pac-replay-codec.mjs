@@ -21,7 +21,9 @@ import path from 'node:path';
 import os from 'node:os';
 
 const EXIT = Object.freeze({ OK: 0, FAILED: 1, USAGE: 2 });
-const EXT = Object.freeze({ replay: '.colreplay', packed: '.clrz' });
+/** packed: what pack writes. legacy: the name pre-release builds used; still read, since files are recognised by
+ * their first bytes, not their name. */
+const EXT = Object.freeze({ replay: '.colreplay', packed: '.paczd', legacy: '.clrz' });
 const COMMANDS = new Set(['pack', 'unpack', 'verify']);
 const KB = 1024;
 const MB = KB * KB;
@@ -35,11 +37,12 @@ Usage:
   pac-replay-codec unpack <files or folders> [-o outdir] [--jobs N] [--json]
   pac-replay-codec verify <files or folders>             [--jobs N] [--json]
 
-  pack     .colreplay -> .clrz. Each one is unpacked again and compared byte for byte before it counts.
-  unpack   .clrz -> .colreplay. Size and crc32 are checked before anything is written.
-  verify   writes nothing. A .clrz must unpack exact; a .colreplay must pack and come back exact.
+  pack     .colreplay -> .paczd. Each one is unpacked again and compared byte for byte before it counts.
+  unpack   .paczd -> .colreplay. Size and crc32 are checked before anything is written.
+  verify   writes nothing. A .paczd must unpack exact; a .colreplay must pack and come back exact.
 
-  Folders are walked recursively: pack takes .colreplay files, unpack and verify take .clrz and .colreplay.
+  Folders are walked recursively: pack takes .colreplay files, unpack takes .paczd, verify takes both.
+  Files named .clrz (pre-release builds) are read like .paczd: files are recognised by their first bytes.
   Outputs go next to each input, or under -o outdir with the folder layout kept.
   Originals are never deleted. An output that already exists is skipped, never replaced.
   Two inputs that would write the same output: the second one fails and nothing is written for it.
@@ -116,9 +119,10 @@ function parseArgs(argv) {
 /** @complexity O(1) */
 function wantedInFolder(cmd, name) {
   const n = name.toLowerCase();
+  const packed = n.endsWith(EXT.packed) || n.endsWith(EXT.legacy);
   if (cmd === 'pack') return n.endsWith(EXT.replay);
-  if (cmd === 'unpack') return n.endsWith(EXT.packed);
-  return n.endsWith(EXT.packed) || n.endsWith(EXT.replay);
+  if (cmd === 'unpack') return packed;
+  return packed || n.endsWith(EXT.replay);
 }
 
 /** @complexity O(1) */
@@ -127,7 +131,9 @@ function outputName(cmd, name) {
     const base = name.toLowerCase().endsWith(EXT.replay) ? name.slice(0, -EXT.replay.length) : name;
     return base + EXT.packed;
   }
-  const base = name.toLowerCase().endsWith(EXT.packed) ? name.slice(0, -EXT.packed.length) : name;
+  const lower = name.toLowerCase();
+  const ext = lower.endsWith(EXT.packed) ? EXT.packed : lower.endsWith(EXT.legacy) ? EXT.legacy : '';
+  const base = ext ? name.slice(0, -ext.length) : name;
   return path.extname(base) ? base : base + EXT.replay;
 }
 

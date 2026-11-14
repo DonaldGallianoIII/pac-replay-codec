@@ -22,7 +22,9 @@ const CONFIG = {
    * The best file sets the headline; the worst and the median sit right under it.
    */
   SAMPLE: { best: 12.4, median: 11.4, worst: 10.2, files: 100 },
-  PACKED_EXT: '.clrz',
+  PACKED_EXT: '.paczd',
+  /** The name pre-release builds gave packed files; still read (the worker goes by the first bytes, not the name). */
+  LEGACY_PACKED_EXT: '.clrz',
   REPLAY_EXT: '.colreplay',
   ZIP_NAME: 'pac-replay-codec-files.zip',
   /** How long the zip's object URL is kept after the click: some browsers read a large blob URL late. */
@@ -131,7 +133,10 @@ function outputName(name, kind) {
     const base = name.toLowerCase().endsWith(CONFIG.REPLAY_EXT) ? name.slice(0, -CONFIG.REPLAY_EXT.length) : name;
     return base + CONFIG.PACKED_EXT;
   }
-  const base = name.toLowerCase().endsWith(CONFIG.PACKED_EXT) ? name.slice(0, -CONFIG.PACKED_EXT.length) : name;
+  const lower = name.toLowerCase();
+  const ext = lower.endsWith(CONFIG.PACKED_EXT) ? CONFIG.PACKED_EXT
+    : lower.endsWith(CONFIG.LEGACY_PACKED_EXT) ? CONFIG.LEGACY_PACKED_EXT : '';
+  const base = ext ? name.slice(0, -ext.length) : name;
   return base.includes('.') ? base : base + CONFIG.REPLAY_EXT;
 }
 
@@ -269,10 +274,10 @@ function renderSummary() {
   const bars = [];
   if (t.packs > 0) {
     bars.push({ label: 'Pack: original replays', value: t.packIn, text: formatBytes(t.packIn) });
-    bars.push({ label: 'Pack: .clrz files out', value: t.packOut, text: formatBytes(t.packOut), hi: true });
+    bars.push({ label: 'Pack: .paczd files out', value: t.packOut, text: formatBytes(t.packOut), hi: true });
   }
   if (t.unpacks > 0) {
-    bars.push({ label: 'Unpack: .clrz files in', value: t.unpackIn, text: formatBytes(t.unpackIn), hi: true });
+    bars.push({ label: 'Unpack: .paczd files in', value: t.unpackIn, text: formatBytes(t.unpackIn), hi: true });
     bars.push({ label: 'Unpack: replays restored', value: t.unpackOut, text: formatBytes(t.unpackOut) });
   }
   mounts.chart.replaceChildren(
@@ -371,7 +376,7 @@ function renderRow(entry) {
         el('span', { class: 'check', text: r.stored ? `= ${r.note}`
           : `✓ exact: verified by checksum (crc32 ${hex(r.crc)})${smaller ? ' and a full unpack, byte for byte' : ''}` }),
         el('a', { class: 'btn btn-small', href: entry.url, download: entry.outName,
-          text: `↓ ${r.kind === 'pack' ? '.clrz' : '.colreplay'}`, title: entry.outName,
+          text: `↓ ${r.kind === 'pack' ? '.paczd' : '.colreplay'}`, title: entry.outName,
           attrs: { 'aria-label': `Download ${entry.outName}` } })),
     );
   } else if (r && !r.ok) {
@@ -398,9 +403,9 @@ function miniBar(frac, packed) {
 
 /** Plain words and a next step for the codec's common errors; anything else is shown as it came. @complexity O(1) */
 function friendlyError(msg) {
-  if (/damaged|crc32 mismatch/.test(msg)) return 'This .clrz is damaged or cut short. Pack the original replay again.';
-  if (/format version|predictor set|mode \d+ is not supported/.test(msg)) return 'This .clrz was made by a newer version of the codec. Use that version to unpack it.';
-  if (/starting model/.test(msg)) return 'This .clrz was packed with a starting model this page does not have.';
+  if (/damaged|crc32 mismatch/.test(msg)) return 'This .paczd is damaged or cut short. Pack the original replay again.';
+  if (/format version|predictor set|mode \d+ is not supported/.test(msg)) return 'This .paczd was made by a newer version of the codec. Use that version to unpack it.';
+  if (/starting model/.test(msg)) return 'This .paczd was packed with a starting model this page does not have.';
   if (/could not read the file/.test(msg)) return 'The browser could not read this file. If it is a folder, drop the folder itself, not its shortcut.';
   return msg;
 }
@@ -474,7 +479,7 @@ function wireDrop() {
 
 /**
  * The files under dropped entries. A file dropped on its own is always taken; inside a dropped folder only
- * .colreplay and .clrz files are, so a folder of mixed things does not fill the list with "kept as is".
+ * .colreplay, .paczd and legacy .clrz files are, so a folder of mixed things does not fill the list with "kept as is".
  * An entry the browser cannot read (no permission, removed after the drag) is listed in `failures` and the rest
  * still come through.
  * @returns {Promise<{ files: File[], failures: { name: string, error: string }[] }>}
@@ -486,7 +491,7 @@ async function filesFromEntries(entries) {
   const failures = [];
   const wanted = (name) => {
     const n = name.toLowerCase();
-    return n.endsWith(CONFIG.REPLAY_EXT) || n.endsWith(CONFIG.PACKED_EXT);
+    return n.endsWith(CONFIG.REPLAY_EXT) || n.endsWith(CONFIG.PACKED_EXT) || n.endsWith(CONFIG.LEGACY_PACKED_EXT);
   };
   const fileOf = (entry) => new Promise((resolve, reject) => entry.file(resolve, reject));
   const readAll = async (dir) => {

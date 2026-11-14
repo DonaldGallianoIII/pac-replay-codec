@@ -10,7 +10,7 @@ best 12.4x.
 Two ways to use it:
 
 1. **In the browser:** <https://donaldgallianoiii.github.io/pac-replay-codec/>. Drop replays on the page, get
-   `.clrz` files back. Drop a `.clrz` and you get the original. It runs in your browser and nothing is uploaded.
+   `.paczd` files back. Drop a `.paczd` and you get the original. It runs in your browser and nothing is uploaded.
 2. **In a terminal:** `npx pac-replay-codec pack ./replays` packs every replay in a folder. Needs Node 22.18 or
    newer, nothing else.
 
@@ -163,7 +163,10 @@ What it promises, whatever the flags:
 4. **The same inputs print the same lines in the same order**, however many threads ran. `--jobs` defaults to
    the number of cores minus one.
 
-`verify` writes nothing. A `.clrz` must unpack exact; a `.colreplay` must pack and come back exact.
+`verify` writes nothing. A `.paczd` must unpack exact; a `.colreplay` must pack and come back exact.
+
+Packed files are recognised by their first four bytes, not their name, so files named `.clrz` by pre-release
+builds unpack and verify the same way. Folder walks pick up both names.
 
 For scripts and AI agents, `--json` prints one line per file and a summary line last. This is a real run on one
 of the small synthetic test files (a real replay comes out near 11x):

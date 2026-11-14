@@ -4,11 +4,12 @@
 
 First public release.
 
-- **Format version 1 of `.clrz`.** Lossless: every packed file unpacks to the exact original bytes, checked by
+- **Format version 1 of `.paczd`** (container magic `CLRZ`). Files named `.clrz` by pre-release builds are the same
+  format and are read too. Lossless: every packed file unpacks to the exact original bytes, checked by
   size and crc32. The format is locked by the sha256 tests in `test/codec.test.ts`; see [FORMAT.md](FORMAT.md).
 - **Size.** On 100 sample replays packed one by one: worst 10.2x, median 11.4x, best 12.4x smaller than the raw
   file. Smaller files compress slightly worse.
-- **Web page** (`web/`). Drop replays or folders to pack, drop `.clrz` to unpack. Runs in the browser and
+- **Web page** (`web/`). Drop replays or folders to pack, drop `.paczd` to unpack. Runs in the browser and
   makes no network requests. Every pack is unpacked again and compared byte for byte before it is offered.
 - **Command line tool** `pac-replay-codec`: `pack`, `unpack` and `verify` over files and folders, on several
   threads, with `--json` output for scripts and AI agents. Never deletes or replaces a file.

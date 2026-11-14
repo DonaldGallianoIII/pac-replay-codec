@@ -22,7 +22,7 @@ const CLI = path.join(import.meta.dirname, '..', 'cli', 'pac-replay-codec.mjs');
 const FIXTURES = path.join(import.meta.dirname, 'fixtures');
 const NAMES = ['synthetic-schema4.colreplay', 'synthetic-schema5.colreplay'];
 const EXIT = Object.freeze({ OK: 0, FAILED: 1, USAGE: 2 });
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'clrz-cli-test-'));
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'paczd-cli-test-'));
 test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 const sha = (file: string): string => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -82,12 +82,12 @@ test('pack a folder: recursive, every file exact, outputs next to inputs, origin
     assert.equal(f.error, null);
     assert.ok(f.ratio > 3, `ratio ${f.ratio}`);
     assert.ok(fs.existsSync(f.out), `${f.out} was written`);
-    assert.ok(f.out.endsWith('.clrz'));
+    assert.ok(f.out.endsWith('.paczd'));
     for (const key of ['file', 'out', 'status', 'in_bytes', 'out_bytes', 'ratio', 'exact', 'stored', 'error']) assert.ok(key in f, key);
   }
   assert.deepEqual([summary.files, summary.exact, summary.skipped, summary.failed], [4, 4, 0, 0]);
   assert.ok(summary.ratio > 3);
-  assert.ok(fs.existsSync(path.join(dir, 'deeper', 'copy-synthetic-schema4.clrz')));
+  assert.ok(fs.existsSync(path.join(dir, 'deeper', 'copy-synthetic-schema4.paczd')));
   assertOriginalsUntouched(before);
 });
 
@@ -101,7 +101,7 @@ test('results come in the order the files were found, whatever the thread count'
 test('pack again: everything is skipped, nothing is replaced', () => {
   const { dir } = tree('again');
   assert.equal(run('pack', dir).code, EXIT.OK);
-  const packed = listAll(dir).filter((f) => f.endsWith('.clrz'));
+  const packed = listAll(dir).filter((f) => f.endsWith('.paczd'));
   const hashes = packed.map(sha);
   const stamps = packed.map((f) => fs.statSync(f).mtimeMs);
   const r = run('pack', dir, '--json');
@@ -117,11 +117,11 @@ test('pack skips a file that is already packed, even when named as a replay', ()
   const { dir } = tree('already');
   run('pack', path.join(dir, NAMES[0]));
   const disguised = path.join(dir, 'disguised.colreplay');
-  fs.copyFileSync(path.join(dir, NAMES[0].replace('.colreplay', '.clrz')), disguised);
+  fs.copyFileSync(path.join(dir, NAMES[0].replace('.colreplay', '.paczd')), disguised);
   const { files } = parse(run('pack', disguised, '--json').lines);
   assert.equal(files[0].status, 'skipped');
   assert.equal(files[0].error, 'already packed');
-  assert.ok(!fs.existsSync(path.join(dir, 'disguised.clrz')));
+  assert.ok(!fs.existsSync(path.join(dir, 'disguised.paczd')));
 });
 
 test('unpack into -o: the folder layout is kept and every byte comes back', () => {
@@ -139,11 +139,11 @@ test('unpack into -o: the folder layout is kept and every byte comes back', () =
   }
 });
 
-test('verify: writes nothing; a damaged .clrz and a missing path fail with exit 1', () => {
+test('verify: writes nothing; a damaged .paczd and a missing path fail with exit 1', () => {
   const { dir } = tree('verify');
   run('pack', dir);
-  const good = path.join(dir, NAMES[1].replace('.colreplay', '.clrz'));
-  const bad = path.join(TMP, 'damaged.clrz');
+  const good = path.join(dir, NAMES[1].replace('.colreplay', '.paczd'));
+  const bad = path.join(TMP, 'damaged.paczd');
   fs.writeFileSync(bad, fs.readFileSync(good).subarray(0, 2000));
   const filesBefore = listAll(TMP).length;
   const r = run('verify', good, bad, path.join(TMP, 'no-such-file'), '--json');
@@ -152,8 +152,8 @@ test('verify: writes nothing; a damaged .clrz and a missing path fail with exit 
   const byFile = new Map(files.map((f) => [path.basename(f.file), f]));
   assert.equal(byFile.get(path.basename(good)).status, 'verified');
   assert.equal(byFile.get(path.basename(good)).exact, true);
-  assert.equal(byFile.get('damaged.clrz').status, 'failed');
-  assert.match(byFile.get('damaged.clrz').error, /damaged/);
+  assert.equal(byFile.get('damaged.paczd').status, 'failed');
+  assert.match(byFile.get('damaged.paczd').error, /damaged/);
   assert.equal(byFile.get('no-such-file').error, 'no such file or folder');
   assert.deepEqual([summary.exact, summary.failed], [1, 2]);
   assert.equal(listAll(TMP).length, filesBefore, 'verify wrote nothing');
@@ -163,7 +163,7 @@ test('unpack of a file that is not packed fails, and writes nothing', () => {
   const { dir } = tree('notpacked');
   const r = run('unpack', path.join(dir, NAMES[0]), '--json');
   assert.equal(r.code, EXIT.FAILED);
-  assert.equal(parse(r.lines).files[0].error, 'not a .clrz file');
+  assert.equal(parse(r.lines).files[0].error, 'not a .paczd file');
   assert.ok(!fs.existsSync(path.join(dir, 'synthetic-schema4.colreplay.colreplay')));
 });
 
@@ -201,7 +201,7 @@ test('two inputs that would write the same output: the second fails before any w
     assert.equal(files[1].status, 'failed');
     assert.match(files[1].error, /^output name collides with /);
     assert.deepEqual([summary.exact, summary.failed], [1, 1]);
-    assert.deepEqual(fs.readdirSync(outDir), ['synthetic-schema4.clrz']);
+    assert.deepEqual(fs.readdirSync(outDir), ['synthetic-schema4.paczd']);
   }
 });
 
@@ -236,5 +236,18 @@ test('a file that is not a replay packs as stored: exact, no ratio, left out of 
   assert.deepEqual([summary.exact, summary.stored], [1, 1]);
   assert.equal(summary.in_bytes, files[1].in_bytes, 'only the replay is in the totals');
   assert.equal(summary.ratio, files[1].ratio);
+});
+
+test('legacy .clrz names: unpack and verify find them in folders and restore .colreplay', () => {
+  const { dir } = tree('legacy');
+  const packedDir = path.join(TMP, 'legacy-packed');
+  assert.equal(run('pack', dir, '-o', packedDir).code, EXIT.OK);
+  for (const f of listAll(packedDir)) fs.renameSync(f, f.replace(/\.paczd$/, '.clrz'));
+  assert.equal(parse(run('verify', packedDir, '--json').lines).summary.exact, 4);
+  const restored = path.join(TMP, 'legacy-restored');
+  const r = run('unpack', packedDir, '-o', restored, '--json');
+  assert.equal(r.code, EXIT.OK);
+  assert.equal(parse(r.lines).summary.exact, 4);
+  for (const n of NAMES) assert.equal(sha(path.join(restored, n)), sha(path.join(FIXTURES, n)));
 });
 

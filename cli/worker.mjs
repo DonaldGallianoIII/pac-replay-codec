@@ -5,7 +5,7 @@
  *
  * Job in:     { id, cmd: 'pack' | 'unpack' | 'verify', file, out }   out is null for verify
  * Result out: { id, status, in_bytes, out_bytes, packed_input, exact, stored, error }
- *             packed_input: the input was a .clrz, so in_bytes is the packed size and out_bytes the original
+ *             packed_input: the input was a .paczd, so in_bytes is the packed size and out_bytes the original
  *             status: 'packed' | 'unpacked' | 'verified' | 'skipped' | 'failed'
  *
  * @interacts cli/pac-replay-codec.mjs (its only caller), the file system (reads `file`, writes `out` once)
@@ -90,7 +90,7 @@ function run(job) {
       return { ...base, status: ok ? 'verified' : 'failed', out_bytes: result.bytes.length, exact: ok,
         stored: result.mode === MODE_STORED, error: ok ? null : 'round trip did not give the same bytes back' };
     }
-    return { ...base, status: 'failed', error: 'not a .clrz file' };
+    return { ...base, status: 'failed', error: 'not a .paczd file' };
   }
 
   // unpackReplay checks the size and the crc32 in the header and throws rather than return wrong bytes.

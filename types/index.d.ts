@@ -72,7 +72,7 @@ export interface PackResult {
 export function packReplay(src: Uint8Array, opts?: PackOptions): PackResult;
 
 /**
- * Unpack a .clrz file to the original bytes. Checks the size and the crc32 of what it rebuilt and throws if the
+ * Unpack a .paczd file to the original bytes. Checks the size and the crc32 of what it rebuilt and throws if the
  * packed bytes are damaged; it never returns wrong bytes.
  * @param priors every starting model you have; the file names the one it needs. Leave out when you use none.
  */
@@ -87,7 +87,7 @@ export function parsePrior(file: Uint8Array): Prior;
 /** crc32 with the zlib polynomial. */
 export function crc32(b: Uint8Array): number;
 
-/** The first four bytes of every .clrz file: "CLRZ". */
+/** The first four bytes of every .paczd file: "CLRZ". */
 export const CONTAINER_MAGIC: number[];
 export const FORMAT_VERSION: number;
 export const PREDICTORS_SCHEMA: number;
