@@ -9,10 +9,18 @@ best 12.4x.
 
 Two ways to use it:
 
-1. **In the browser:** <https://donaldgallianoiii.github.io/pac-replay-codec/>. Drop replays on the page, get
-   `.paczd` files back. Drop a `.paczd` and you get the original. It runs in your browser and nothing is uploaded.
-2. **In a terminal:** `npx pac-replay-codec pack ./replays` packs every replay in a folder. Needs Node 22.18 or
-   newer, nothing else.
+1. **In the browser:** <https://donaldgallianoiii.github.io/pac-replay-codec/>. Drop replays (or a whole folder)
+   on the page, get `.paczd` files back. Drop a `.paczd` and you get the original. It runs in your browser and
+   nothing is uploaded. Good for a handful of games up to a few hundred.
+2. **In a terminal, for bulk:** one command packs every replay in a folder and its subfolders, on all your cores,
+   and checks each one byte for byte. Needs Node 22.18 or newer, nothing else:
+
+   ```sh
+   npx github:DonaldGallianoIII/pac-replay-codec pack ./replays
+   ```
+
+   The npm package (`npx pac-replay-codec`) is waiting on npm's review. Until it is live, use the `github:` form
+   above: same tool, same results.
 
 ![Size per replay by compressor, bars from zero. This codec is 11.2x, the best generic compressor is 4.0x.](https://raw.githubusercontent.com/DonaldGallianoIII/pac-replay-codec/main/docs/compressors.svg)
 
@@ -117,10 +125,11 @@ it (Node's own type stripper, nothing to install). A test fails if you forget.
 
 ### The library
 
-No dependencies and no Node-only calls, so it runs in Node and in browsers. From npm:
+No dependencies and no Node-only calls, so it runs in Node and in browsers. Install it from GitHub (the npm
+package `pac-replay-codec` is waiting on npm's review; once it is live, `npm install pac-replay-codec` works too):
 
 ```sh
-npm install pac-replay-codec
+npm install github:DonaldGallianoIII/pac-replay-codec
 ```
 
 ```js
@@ -143,14 +152,17 @@ can also import the TypeScript source,
 `pac-replay-codec` packs, unpacks and verifies many replays at once. Node 22.18 or newer, no other
 dependencies.
 
+This is the tool for bulk conversion: point it at a folder of any size.
+
 ```sh
-npx pac-replay-codec pack ./replays                         # every .colreplay under ./replays, recursively
-npx pac-replay-codec pack ./replays -o ./packed --jobs 4
-npx pac-replay-codec unpack ./packed -o ./restored
-npx pac-replay-codec verify ./packed --json
+npx github:DonaldGallianoIII/pac-replay-codec pack ./replays                 # every .colreplay under ./replays
+npx github:DonaldGallianoIII/pac-replay-codec pack ./replays -o ./packed --jobs 4
+npx github:DonaldGallianoIII/pac-replay-codec unpack ./packed -o ./restored
+npx github:DonaldGallianoIII/pac-replay-codec verify ./packed --json
 ```
 
-`npm install -g pac-replay-codec` makes it a plain `pac-replay-codec` command. From a clone, run
+Once the npm package is live, `npx pac-replay-codec ...` is the same command, shorter. To get a plain
+`pac-replay-codec` command, run `npm install -g github:DonaldGallianoIII/pac-replay-codec`. From a clone, run
 `node cli/pac-replay-codec.mjs` with the same arguments.
 
 What it promises, whatever the flags:

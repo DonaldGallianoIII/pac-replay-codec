@@ -64,6 +64,16 @@
         An adaptive binary range coder writes only the surprise. The decoder runs the same model in reverse.</p>
       </details>
       <details>
+        <summary>Thousands of replays? Use the command line</summary>
+        <p>This page is good for a handful of games up to a few hundred. For a big folder, the command line tool
+        packs every replay in it and its subfolders on all your cores, and checks each one byte for byte. It needs
+        Node 22.18 or newer, nothing else:</p>
+        <p><code>npx github:DonaldGallianoIII/pac-replay-codec pack ./replays</code></p>
+        <p>Unpack with <code>unpack</code>, check with <code>verify</code>, add <code>--json</code> for scripts and AI
+        agents. Full guide in the
+          <a href="https://github.com/DonaldGallianoIII/pac-replay-codec#command-line-and-ai-agents" rel="noopener noreferrer">README</a>.</p>
+      </details>
+      <details>
         <summary>Costs and limits</summary>
         <ul>
           <li><b>CPU.</b> About 0.3 s to pack and 0.2 s to unpack one 3.4 MB replay. zstd is faster; it copies,
@@ -80,7 +90,8 @@
   <footer class="foot">
     <p>Free software under GPL-3.0. Built for replays of
       <a href="https://github.com/keldaanCommunity/pokemonAutoChess" rel="noopener noreferrer">Pokemon Auto Chess</a>,
-      whose game code the PAC-aware layer is derived from. Not affiliated with the game.</p>
+      whose game code the PAC-aware layer is derived from. Not affiliated with the game.
+      Source: <a href="https://github.com/DonaldGallianoIII/pac-replay-codec" rel="noopener noreferrer">GitHub</a>.</p>
   </footer>
 </body>
 </html>
