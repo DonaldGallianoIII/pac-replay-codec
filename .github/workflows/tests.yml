@@ -1,0 +1,27 @@
+# Tests and the type check on every push and pull request.
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Tests (includes the check that web/lib matches src)
+        run: node --test test/*.test.ts
+      - name: Install the type checker
+        run: npm install --no-audit --no-fund
+      - name: Type check (includes the check that types/index.d.ts matches src)
+        run: npx tsc -p tsconfig.json

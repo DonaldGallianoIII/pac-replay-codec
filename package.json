@@ -29,13 +29,18 @@
   "bin": {
     "pac-replay-codec": "cli/pac-replay-codec.mjs"
   },
+  "types": "./types/index.d.ts",
   "exports": {
-    ".": "./web/lib/index.js",
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./web/lib/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "cli/",
     "web/lib/",
+    "types/",
     "README.md",
     "FORMAT.md",
     "CHANGELOG.md",
@@ -51,6 +56,6 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.6.0"
+    "typescript": "^7.0.2"
   }
 }

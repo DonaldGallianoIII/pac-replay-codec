@@ -14,7 +14,7 @@ Two ways to use it:
 2. **In a terminal:** `npx pac-replay-codec pack ./replays` packs every replay in a folder. Needs Node 22.18 or
    newer, nothing else.
 
-![Size per replay by compressor, bars from zero. This codec is 11.2x, the best generic compressor is 4.0x.](docs/compressors.svg)
+![Size per replay by compressor, bars from zero. This codec is 11.2x, the best generic compressor is 4.0x.](https://raw.githubusercontent.com/DonaldGallianoIII/pac-replay-codec/main/docs/compressors.svg)
 
 ## Who it is for
 
@@ -133,7 +133,8 @@ const original = unpackReplay(packed);            // throws if the packed bytes 
 container. `unpackReplay` checks the size and the crc32 of what it rebuilt. It returns the original or throws.
 It never returns something else.
 
-The npm package is plain JavaScript (`web/lib/`). From a clone you can also import the TypeScript source,
+The npm package is plain JavaScript (`web/lib/`) with TypeScript types (`types/index.d.ts`). From a clone you
+can also import the TypeScript source,
 `./src/index.ts`, which Node 22.18 or newer runs directly.
 
 ### Command line and AI agents
