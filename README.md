@@ -124,13 +124,58 @@ const original = unpackReplay(packed);            // throws if the packed bytes 
 container. `unpackReplay` checks the size and the crc32 of what it rebuilt. It returns the original or throws.
 It never returns something else.
 
+### Command line and AI agents
+
+`cli/pac-replay-codec.mjs` packs, unpacks and verifies many replays at once. Plain Node 22.18 or newer, no
+install step, no dependencies. From a clone:
+
+```sh
+node cli/pac-replay-codec.mjs pack ~/replays                      # every .colreplay under ~/replays, recursively
+node cli/pac-replay-codec.mjs pack ~/replays -o ~/packed --jobs 4
+node cli/pac-replay-codec.mjs unpack ~/packed -o ~/restored
+node cli/pac-replay-codec.mjs verify ~/packed --json
+npx . pack ~/replays                                              # the same, through the package's bin entry
+```
+
+What it promises, whatever the flags:
+
+1. **Originals are never deleted or changed.** Outputs go next to each input, or under `-o` with the folder layout
+   kept. An output that already exists is skipped, never replaced, so running it twice is safe.
+2. **A pack counts only when it is exact.** Each packed file is unpacked again and compared byte for byte with the
+   original before it is written.
+3. **Already packed files are skipped** by `pack`, found by their first bytes, not their name.
+4. **The same inputs print the same lines in the same order**, however many threads ran. `--jobs` defaults to
+   the number of cores minus one.
+
+`verify` writes nothing. A `.clrz` must unpack exact; a `.colreplay` must pack and come back exact.
+
+For scripts and AI agents, `--json` prints one line per file and a summary line last. This is a real run on one
+of the small synthetic test files (a real replay comes out near 11x):
+
+```sh
+node cli/pac-replay-codec.mjs verify test/fixtures/synthetic-schema5.colreplay --json
+```
+
+```json
+{"file":"test/fixtures/synthetic-schema5.colreplay","out":null,"status":"verified","in_bytes":19705,"out_bytes":4483,"ratio":4.4,"exact":true,"error":null}
+{"summary":true,"files":1,"exact":1,"skipped":0,"failed":0,"in_bytes":19705,"out_bytes":4483,"ratio":4.4}
+```
+
+`out` is the written file for `pack` and `unpack`, and `null` for `verify`.
+
+`status` is `packed`, `unpacked`, `verified`, `skipped` or `failed`. `ratio` is always original size over
+packed size, in every command. In the summary, `in_bytes` and `out_bytes` are those two totals.
+
+Exit codes: **0** every file exact or skipped, **1** at least one failed, **2** bad usage. A path that does not
+exist counts as a failed file (exit 1), not as bad usage. `--help` prints all of this with examples.
+
 ### Tests
 
 The repository holds no recorded games. The tests run on two small synthetic replays in `test/fixtures/`, written
 by `test/make-synthetic.cjs` from Colyseus's own encoder (schema 4 and 5) with a made-up schema that is not a game.
 
 ```sh
-node --test test/*.test.ts                                   # 16 tests, a few seconds
+node --test test/*.test.ts                                   # 25 tests, a few seconds
 REPLAY_DIR=~/my-replays node --test test/codec.test.ts       # plus 3 that run on your own .colreplay files
 ```
 

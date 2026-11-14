@@ -4,7 +4,9 @@
   "description": "Lossless codec for Pokemon Auto Chess replays: about 11x smaller than the raw file, exact bytes back.",
   "license": "GPL-3.0-only",
   "type": "module",
-  "engines": { "node": ">=22.18" },
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "test": "node --test test/*.test.ts",
     "build:web": "node tools/build-web.mjs",
@@ -15,5 +17,16 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
-  }
+  },
+  "bin": {
+    "pac-replay-codec": "cli/pac-replay-codec.mjs"
+  },
+  "files": [
+    "cli/",
+    "web/",
+    "src/",
+    "README.md",
+    "FORMAT.md",
+    "LICENSE"
+  ]
 }
