@@ -7,7 +7,7 @@
  *   2. A pack counts only after the packed bytes were unpacked again and matched the original byte for byte.
  *   3. Results print in the order the files were found, so two runs on the same inputs print the same lines.
  *
- * Exit codes: 0 every file exact or skipped, 1 at least one file failed, 2 bad usage.
+ * Exit codes: 0 every file exact, stored or skipped, 1 at least one file failed, 2 bad usage.
  *
  * @interacts cli/worker.mjs (one worker thread per job slot), the file system (walks the inputs, writes outputs)
  * @deps      node:worker_threads, node:fs, node:path, node:os, cli/worker.mjs
@@ -42,6 +42,7 @@ Usage:
   Folders are walked recursively: pack takes .colreplay files, unpack and verify take .clrz and .colreplay.
   Outputs go next to each input, or under -o outdir with the folder layout kept.
   Originals are never deleted. An output that already exists is skipped, never replaced.
+  Two inputs that would write the same output: the second one fails and nothing is written for it.
   Files that are already packed are skipped by pack.
 
 Options:
@@ -51,12 +52,13 @@ Options:
   -h, --help      this text
 
 JSON line per file:
-  {"file","out","status","in_bytes","out_bytes","ratio","exact","error"}
-  status is packed, unpacked, verified, skipped or failed. ratio is original size / packed size.
+  {"file","out","status","in_bytes","out_bytes","ratio","exact","stored","error"}
+  status is packed, stored, unpacked, verified, skipped or failed. ratio is original size / packed size.
+  stored: not a replay, kept as it was inside the container (exact, but no ratio and not in the totals).
 Summary line:
-  {"summary":true,"files","exact","skipped","failed","in_bytes","out_bytes","ratio"}
+  {"summary":true,"files","exact","stored","skipped","failed","in_bytes","out_bytes","ratio"}
 
-Exit codes: 0 all exact or skipped, 1 some failed, 2 bad usage.
+Exit codes: 0 all exact, stored or skipped, 1 some failed, 2 bad usage.
 
 Examples:
   npx pac-replay-codec pack ./replays
@@ -132,14 +134,18 @@ function outputName(cmd, name) {
 /**
  * Every file the command will touch, in a stable order: inputs in the order given, folder contents sorted by name.
  * A file reached twice is listed once. Symbolic links to folders are not followed, so a link loop cannot hang it.
- * @returns {{ jobs: object[], missing: string[] }}
+ * Problems found here become failed jobs in their place in the order, decided before any thread starts: a path
+ * that does not exist, a folder that cannot be read, and a second input whose output path another input already
+ * claimed (otherwise one would silently win a race and the other be reported as skipped).
+ * @returns {object[]} jobs; a job with `fail` set is reported failed and never sent to a worker
  * @complexity O(E log E) over the E entries walked
- * @alloc one job record per file
+ * @alloc one job record per file, one set entry per input and per output path
  */
 function collect(opts) {
   const jobs = [];
-  const missing = [];
   const seen = new Set();
+  const outs = new Map();
+  const fail = (shown, error) => jobs.push({ id: jobs.length, cmd: opts.cmd, file: null, out: null, shown, fail: error });
   const add = (file, rel) => {
     const abs = path.resolve(file);
     if (seen.has(abs)) return;
@@ -148,11 +154,23 @@ function collect(opts) {
     let out = null;
     if (opts.cmd !== 'verify') {
       out = opts.out ? path.join(path.resolve(opts.out), path.dirname(rel), outName) : path.join(path.dirname(abs), outName);
+      if (outs.has(out)) {
+        fail(file, `output name collides with ${outs.get(out)}`);
+        return;
+      }
+      outs.set(out, file);
     }
-    jobs.push({ id: jobs.length, cmd: opts.cmd, file: abs, out, shown: file });
+    jobs.push({ id: jobs.length, cmd: opts.cmd, file: abs, out, shown: file, fail: null });
   };
   const walk = (dir, root) => {
-    const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      fail(dir, `could not read folder (${err.code || err.message})`);
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const e of entries) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) walk(full, root);
@@ -166,13 +184,13 @@ function collect(opts) {
     try {
       st = fs.statSync(input);
     } catch {
-      missing.push(input);
+      fail(input, 'no such file or folder');
       continue;
     }
     if (st.isDirectory()) walk(input, input);
     else add(input, path.basename(input));
   }
-  return { jobs, missing };
+  return jobs;
 }
 
 /** @complexity O(1) */
@@ -207,18 +225,24 @@ function human(n) {
   return `${n} B`;
 }
 
-/** One finished file as the JSON record the help text promises. @complexity O(1) */
+/**
+ * One finished file as the JSON record the help text promises. A pack of something that is not a replay is kept
+ * as it was inside the container: it is reported as `stored`, like the page's "kept as is", and left out of the
+ * summary ratio.
+ * @complexity O(1)
+ */
 function record(job, r) {
-  return { file: job.shown, out: job.out, status: r.status, in_bytes: r.in_bytes, out_bytes: r.out_bytes,
-    ratio: ratioOf(r), exact: r.exact, error: r.error };
+  const status = r.stored && r.status === 'packed' ? 'stored' : r.status;
+  return { file: job.shown, out: job.out, status, in_bytes: r.in_bytes, out_bytes: r.out_bytes,
+    ratio: r.stored ? null : ratioOf(r), exact: r.exact, stored: r.stored === true, error: r.error };
 }
 
 /** @complexity O(1) */
 function humanLine(rec) {
-  const mark = rec.status === 'failed' ? 'x' : rec.status === 'skipped' ? '-' : 'ok';
+  const mark = rec.status === 'failed' ? 'x' : rec.status === 'skipped' ? '-' : rec.stored ? '=' : 'ok';
   const sizes = rec.out_bytes != null ? `  ${human(rec.in_bytes)} -> ${human(rec.out_bytes)}` : '';
   const ratio = rec.ratio != null && rec.status !== 'skipped' ? `  ${rec.ratio}x` : '';
-  const why = rec.error ? `  (${rec.error})` : rec.exact ? '  exact' : '';
+  const why = rec.error ? `  (${rec.error})` : rec.stored ? '  exact, not a replay: kept as it was' : rec.exact ? '  exact' : '';
   return `${mark.padEnd(2)} ${rec.status.padEnd(8)} ${rec.file}${sizes}${ratio}${why}`;
 }
 
@@ -231,6 +255,12 @@ function runPool(jobs, n, emit) {
   return new Promise((resolve) => {
     if (jobs.length === 0) { resolve(); return; }
     const results = new Array(jobs.length);
+    // jobs that already failed in collect() have their result now; only the others go to a thread
+    for (const j of jobs) {
+      if (j.fail) results[j.id] = { id: j.id, status: 'failed', in_bytes: null, out_bytes: null, packed_input: false,
+        exact: false, stored: false, error: j.fail };
+    }
+    const queue = jobs.filter((j) => !j.fail);
     let next = 0;
     let printed = 0;
     let done = 0;
@@ -242,14 +272,14 @@ function runPool(jobs, n, emit) {
       results[r.id] = r;
       done++;
       flush();
-      if (next < jobs.length) give(w);
-      if (done === jobs.length) {
+      if (next < queue.length) give(w);
+      if (done === queue.length) {
         for (const x of workers) x.terminate();
         resolve();
       }
     };
     const give = (w) => {
-      const job = jobs[next++];
+      const job = queue[next++];
       w.current = job.id;
       w.postMessage({ id: job.id, cmd: job.cmd, file: job.file, out: job.out });
     };
@@ -265,7 +295,8 @@ function runPool(jobs, n, emit) {
       });
       return w;
     };
-    const size = Math.min(n, jobs.length);
+    if (queue.length === 0) { flush(); resolve(); return; }
+    const size = Math.min(n, queue.length);
     for (let i = 0; i < size; i++) {
       const w = spawn();
       workers.push(w);
@@ -287,21 +318,18 @@ async function main() {
     process.stdout.write(HELP);
     return EXIT.OK;
   }
-  const { jobs, missing } = collect(opts);
-  const sum = { summary: true, files: 0, exact: 0, skipped: 0, failed: 0, in_bytes: 0, out_bytes: 0, ratio: null };
+  const jobs = collect(opts);
+  const sum = { summary: true, files: 0, exact: 0, stored: 0, skipped: 0, failed: 0, in_bytes: 0, out_bytes: 0,
+    ratio: null };
   const out = (rec) => process.stdout.write((opts.json ? JSON.stringify(rec) : humanLine(rec)) + '\n');
-  for (const m of missing) {
-    sum.files++;
-    sum.failed++;
-    out({ file: m, out: null, status: 'failed', in_bytes: null, out_bytes: null, ratio: null, exact: false, error: 'no such file or folder' });
-  }
-  if (!opts.json && jobs.length === 0 && missing.length === 0) process.stderr.write('pac-replay-codec: no matching files found\n');
+  if (!opts.json && jobs.length === 0) process.stderr.write('pac-replay-codec: no matching files found\n');
   await runPool(jobs, opts.jobs, (job, r) => {
-    if (r.in_bytes == null && safeIsFile(job.file)) r.in_bytes = fs.statSync(job.file).size;
+    if (r.in_bytes == null && job.file && safeIsFile(job.file)) r.in_bytes = fs.statSync(job.file).size;
     const rec = record(job, r);
     sum.files++;
     if (rec.status === 'failed') sum.failed++;
     else if (rec.status === 'skipped') sum.skipped++;
+    else if (rec.stored) sum.stored++;
     else if (rec.exact) {
       sum.exact++;
       // the summary's in_bytes and out_bytes are original and packed totals, in the direction of ratio
@@ -314,7 +342,7 @@ async function main() {
   if (sum.out_bytes > 0) sum.ratio = Number((sum.in_bytes / sum.out_bytes).toFixed(RATIO_DECIMALS));
   if (opts.json) process.stdout.write(JSON.stringify(sum) + '\n');
   else {
-    process.stdout.write(`\n${sum.exact} exact, ${sum.skipped} skipped, ${sum.failed} failed, of ${sum.files}` +
+    process.stdout.write(`\n${sum.exact} exact, ${sum.stored} stored, ${sum.skipped} skipped, ${sum.failed} failed, of ${sum.files}` +
       (sum.ratio ? `. ${human(sum.in_bytes)} of replays as ${human(sum.out_bytes)} packed, ${sum.ratio}x.` : '.') + '\n');
   }
   return sum.failed > 0 ? EXIT.FAILED : EXIT.OK;

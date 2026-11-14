@@ -3,7 +3,7 @@
  * and a restored replay is the user's own original. Every entry gets the same fixed timestamp (1980-01-01), so the
  * same inputs always give the same zip.
  *
- * @interacts app.js (download all)
+ * @interacts app.js (download all: makeZip, and uniqueNames for the entry names)
  * @deps      none (the crc32 of each file comes from the worker that made it)
  * @complexity O(N) where N is the number of files (at most ZIP_MAX_ENTRIES): bytes are referenced, not copied
  * @alloc     one Blob that references the file blobs plus about 100 bytes of headers per file
@@ -84,4 +84,26 @@ export function makeZip(files) {
   end.setUint32(16, cdStart, true);
   parts.push(end);
   return new Blob(parts, { type: 'application/zip' });
+}
+
+/**
+ * The same names, with " (2)", " (3)" and so on added where needed so no two are equal, including against a file
+ * that is already called "name (2).ext".
+ * @complexity O(N) average, plus the suffix tries for each repeated name
+ * @alloc one set of the final names
+ */
+export function uniqueNames(names) {
+  const taken = new Set(names);
+  const used = new Set();
+  return names.map((name) => {
+    let final = name;
+    if (used.has(final)) {
+      const dot = name.lastIndexOf('.');
+      const base = dot > 0 ? name.slice(0, dot) : name;
+      const ext = dot > 0 ? name.slice(dot) : '';
+      for (let k = 2; used.has(final) || (final !== name && taken.has(final)); k++) final = `${base} (${k})${ext}`;
+    }
+    used.add(final);
+    return final;
+  });
 }

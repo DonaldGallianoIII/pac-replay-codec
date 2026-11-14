@@ -10,7 +10,7 @@
  */
 import { el } from './dom.js';
 import { sizeChart } from './chart.js';
-import { makeZip } from './zip.js';
+import { makeZip, uniqueNames } from './zip.js';
 
 const CONFIG = {
   /** Workers run side by side; each holds about 55 MB while packing. */
@@ -25,6 +25,8 @@ const CONFIG = {
   PACKED_EXT: '.clrz',
   REPLAY_EXT: '.colreplay',
   ZIP_NAME: 'pac-replay-codec-files.zip',
+  /** How long the zip's object URL is kept after the click: some browsers read a large blob URL late. */
+  ZIP_URL_KEEP_MS: 60000,
 };
 const KB = 1024;
 const MB = KB * KB;
@@ -45,7 +47,7 @@ const STATUS = {
  * Everything the page knows. One entry per dropped file, in drop order.
  * @type {{ files: Array<object>, nextId: number }}
  */
-const state = { files: [], nextId: 1 };
+const state = { files: [], nextId: 1, zipUrl: null, zipTimer: null };
 
 const pool = createPool(workerCount());
 const mounts = {
@@ -150,14 +152,16 @@ function addFiles(fileList) {
 function onResult(msg) {
   const entry = state.files.find((f) => f.id === msg.id);
   if (!entry) return; // cleared while it was working
-  entry.result = msg;
   entry.file = null; // the worker has what it needs; let the browser drop its handle
   if (msg.ok) {
     entry.status = msg.stored ? 'stored' : 'exact';
     entry.outName = outputName(entry.name, msg.kind);
     entry.blob = new Blob([msg.out], { type: 'application/octet-stream' });
     entry.url = URL.createObjectURL(entry.blob);
-  } else {
+  }
+  // The Blob now holds the bytes; keeping msg.out too would hold every result twice until Clear.
+  entry.result = { ...msg, out: null };
+  if (!msg.ok) {
     entry.status = 'failed';
   }
   renderRow(entry);
@@ -183,9 +187,31 @@ function announce(finished, n, t) {
     : `${finished} of ${n} done.`;
 }
 
+/**
+ * A row for something that never reached a worker, such as a dropped folder entry the browser could not read.
+ * @complexity O(1)
+ */
+function addFailed(name, error) {
+  const entry = { id: state.nextId++, file: null, name, inSize: 0, status: 'failed',
+    result: { ok: false, kind: '?', error: `could not read the file: ${error}` }, blob: null, url: null, outName: null,
+    row: null };
+  state.files.push(entry);
+  mounts.list.append(rowNode(entry));
+  renderSummary();
+}
+
+/** @complexity O(1) */
+function releaseZipUrl() {
+  if (state.zipTimer !== null) clearTimeout(state.zipTimer);
+  if (state.zipUrl !== null) URL.revokeObjectURL(state.zipUrl);
+  state.zipTimer = null;
+  state.zipUrl = null;
+}
+
 /** Releases every object URL and forgets every file. @complexity O(N) */
 function clearAll() {
   pool.cancelWaiting();
+  releaseZipUrl();
   for (const f of state.files) if (f.url) URL.revokeObjectURL(f.url);
   state.files = [];
   mounts.list.replaceChildren();
@@ -397,23 +423,15 @@ function hex(n) {
 function downloadAll() {
   const ready = state.files.filter((f) => f.blob);
   if (ready.length === 1) { saveUrl(ready[0].url, ready[0].outName); return; }
-  const used = new Map();
-  const files = ready.map((f) => {
-    let name = f.outName;
-    const k = used.get(name) || 0;
-    used.set(name, k + 1);
-    if (k > 0) {
-      const dot = name.lastIndexOf('.');
-      name = `${name.slice(0, dot)} (${k + 1})${name.slice(dot)}`;
-    }
-    return { name, blob: f.blob, crc: f.result.outCrc };
-  });
+  const files = uniqueNames(ready.map((f) => f.outName))
+    .map((name, i) => ({ name, blob: ready[i].blob, crc: ready[i].result.outCrc }));
   let zip;
   try { zip = makeZip(files); } catch (err) { alert(err.message); return; }
-  const url = URL.createObjectURL(zip);
-  saveUrl(url, CONFIG.ZIP_NAME);
-  // The click has started the download; release the URL on the next turn.
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  releaseZipUrl();
+  state.zipUrl = URL.createObjectURL(zip);
+  saveUrl(state.zipUrl, CONFIG.ZIP_NAME);
+  // Keep the URL alive for a while: some browsers start reading a large blob download well after the click.
+  state.zipTimer = setTimeout(releaseZipUrl, CONFIG.ZIP_URL_KEEP_MS);
 }
 
 /** @complexity O(1) */
@@ -437,8 +455,15 @@ function wireDrop() {
     // Entries must be taken while the event is live; reading them can wait.
     const entries = Array.from(e.dataTransfer.items || [])
       .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null));
-    if (entries.length > 0 && entries.every(Boolean)) addFiles(await filesFromEntries(entries));
-    else if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+    try {
+      if (entries.length > 0 && entries.every(Boolean)) {
+        const { files, failures } = await filesFromEntries(entries);
+        addFiles(files);
+        for (const f of failures) addFailed(f.name, f.error);
+      } else if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+    } catch (err) {
+      addFailed('Dropped items', err && err.message ? err.message : String(err));
+    }
   };
   // The whole window accepts a drop, so a near miss does not open the file in the tab.
   window.addEventListener('dragover', over);
@@ -450,11 +475,15 @@ function wireDrop() {
 /**
  * The files under dropped entries. A file dropped on its own is always taken; inside a dropped folder only
  * .colreplay and .clrz files are, so a folder of mixed things does not fill the list with "kept as is".
+ * An entry the browser cannot read (no permission, removed after the drag) is listed in `failures` and the rest
+ * still come through.
+ * @returns {Promise<{ files: File[], failures: { name: string, error: string }[] }>}
  * @complexity O(E) over every entry in the dropped folders
  * @alloc one File handle per kept file
  */
 async function filesFromEntries(entries) {
   const out = [];
+  const failures = [];
   const wanted = (name) => {
     const n = name.toLowerCase();
     return n.endsWith(CONFIG.REPLAY_EXT) || n.endsWith(CONFIG.PACKED_EXT);
@@ -471,20 +500,25 @@ async function filesFromEntries(entries) {
     }
   };
   const walk = async (entry, top) => {
-    if (entry.isFile) {
-      if (top || wanted(entry.name)) out.push(await fileOf(entry));
-    } else if (entry.isDirectory) {
-      for (const child of await readAll(entry)) await walk(child, false);
+    try {
+      if (entry.isFile) {
+        if (top || wanted(entry.name)) out.push(await fileOf(entry));
+      } else if (entry.isDirectory) {
+        for (const child of await readAll(entry)) await walk(child, false);
+      }
+    } catch (err) {
+      failures.push({ name: entry.fullPath || entry.name, error: err && err.message ? err.message : String(err) });
     }
   };
   for (const entry of entries) await walk(entry, true);
-  return out;
+  return { files: out, failures };
 }
 
 /* --------------------------------------------------------------- lifecycle */
 
 function teardown() {
   pool.teardown();
+  releaseZipUrl();
   for (const f of state.files) if (f.url) URL.revokeObjectURL(f.url);
 }
 

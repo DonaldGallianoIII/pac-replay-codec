@@ -83,7 +83,7 @@ test('pack a folder: recursive, every file exact, outputs next to inputs, origin
     assert.ok(f.ratio > 3, `ratio ${f.ratio}`);
     assert.ok(fs.existsSync(f.out), `${f.out} was written`);
     assert.ok(f.out.endsWith('.clrz'));
-    for (const key of ['file', 'out', 'status', 'in_bytes', 'out_bytes', 'ratio', 'exact', 'error']) assert.ok(key in f, key);
+    for (const key of ['file', 'out', 'status', 'in_bytes', 'out_bytes', 'ratio', 'exact', 'stored', 'error']) assert.ok(key in f, key);
   }
   assert.deepEqual([summary.files, summary.exact, summary.skipped, summary.failed], [4, 4, 0, 0]);
   assert.ok(summary.ratio > 3);
@@ -172,7 +172,7 @@ test('human output: one line per file and a summary', () => {
   const r = run('pack', dir);
   assert.equal(r.code, EXIT.OK);
   assert.equal(r.lines.filter((l) => l.startsWith('ok packed')).length, 4);
-  assert.match(r.lines.at(-1) ?? '', /^4 exact, 0 skipped, 0 failed, of 4\./);
+  assert.match(r.lines.at(-1) ?? '', /^4 exact, 0 stored, 0 skipped, 0 failed, of 4\./);
 });
 
 test('bad usage exits 2 with a message; --help exits 0 with examples', () => {
@@ -186,3 +186,55 @@ test('bad usage exits 2 with a message; --help exits 0 with examples', () => {
   assert.equal(h.code, EXIT.OK);
   assert.ok(h.lines.some((l) => l.includes('npx pac-replay-codec pack ./replays')));
 });
+
+test('two inputs that would write the same output: the second fails before any work, exit 1', () => {
+  const { dir } = tree('collide');
+  fs.mkdirSync(path.join(dir, 'other'));
+  fs.copyFileSync(path.join(FIXTURES, NAMES[0]), path.join(dir, 'other', NAMES[0]));
+  const outDir = path.join(TMP, 'collide-out');
+  for (const jobs of ['1', '4']) {
+    fs.rmSync(outDir, { recursive: true, force: true });
+    const r = run('pack', path.join(dir, NAMES[0]), path.join(dir, 'other', NAMES[0]), '-o', outDir, '--json', '--jobs', jobs);
+    assert.equal(r.code, EXIT.FAILED);
+    const { files, summary } = parse(r.lines);
+    assert.equal(files[0].status, 'packed', 'the first input wins, every time');
+    assert.equal(files[1].status, 'failed');
+    assert.match(files[1].error, /^output name collides with /);
+    assert.deepEqual([summary.exact, summary.failed], [1, 1]);
+    assert.deepEqual(fs.readdirSync(outDir), ['synthetic-schema4.clrz']);
+  }
+});
+
+test('a folder that cannot be read is one failed line; the rest of the run goes on', { skip: process.getuid?.() === 0 ? 'root can read any folder' : false }, () => {
+  const { dir } = tree('locked');
+  const locked = path.join(dir, 'locked');
+  fs.mkdirSync(locked);
+  fs.chmodSync(locked, 0o000);
+  try {
+    const r = run('verify', dir, '--json');
+    assert.equal(r.code, EXIT.FAILED);
+    const { files, summary } = parse(r.lines);
+    const bad = files.filter((f) => f.status === 'failed');
+    assert.equal(bad.length, 1);
+    assert.match(bad[0].error, /could not read folder/);
+    assert.equal(summary.exact, 4, 'the four readable replays were still verified');
+  } finally {
+    fs.chmodSync(locked, 0o700);
+  }
+});
+
+test('a file that is not a replay packs as stored: exact, no ratio, left out of the totals', () => {
+  const { dir } = tree('stored');
+  const r = run('pack', path.join(dir, 'notes.txt'), path.join(dir, NAMES[0]), '--json');
+  assert.equal(r.code, EXIT.OK);
+  const { files, summary } = parse(r.lines);
+  assert.equal(files[0].status, 'stored');
+  assert.equal(files[0].stored, true);
+  assert.equal(files[0].exact, true);
+  assert.equal(files[0].ratio, null);
+  assert.equal(files[1].stored, false);
+  assert.deepEqual([summary.exact, summary.stored], [1, 1]);
+  assert.equal(summary.in_bytes, files[1].in_bytes, 'only the replay is in the totals');
+  assert.equal(summary.ratio, files[1].ratio);
+});
+
