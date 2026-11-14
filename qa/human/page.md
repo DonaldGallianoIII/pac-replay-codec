@@ -14,7 +14,7 @@ You need a few `.colreplay` files of your own.
    "1 not a replay, kept as is, not counted".
 7. Cut a `.clrz` short (`head -c 50000 a.clrz > bad.clrz`) and drop it. It says Failed with a reason.
 8. Clear with results on the page asks first.
-9. Theme button: switch both ways. Reload: the choice is remembered.
+9. One light theme only: no theme button, and a system set to dark mode still gets the light page.
 10. **Greyscale pass.** DevTools, Rendering, Emulate vision deficiencies, Achromatopsia. Every status
     still reads from its glyph and word; the highlighted chart bar still has its marker. Then Deuteranopia.
 11. Phone width (375 px in DevTools). No sideways scroll, buttons not cut off.

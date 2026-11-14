@@ -1,6 +1,6 @@
 /*
- * PAC Replay Codec page. OLED Cyan theme: pure black, cyan structure, gunmetal secondary, Archivo condensed for
- * display and JetBrains Mono for data. Light theme keeps the same roles. Status never rests on color alone: each
+ * PAC Replay Codec page. One light theme only: light grey page, white cards, deep teal
+ * structure, Archivo condensed for display and JetBrains Mono for data. Status never rests on color alone: each
  * one has a glyph and a word (see STATUS in app.js).
  */
 
@@ -19,48 +19,6 @@
 }
 
 :root {
-  --bg: #000000;
-  --surface: #0b0e11;
-  --surface-2: #12171c;
-  --rule: #262d34;
-  --ink: #eef3f7;
-  --muted: #8b939c;
-  --line: #2ee6ff;
-  --line-ink: #000000;
-  --good: #c8ff4a;
-  --bad: #ff3d9a;
-  --bar: #3a434d;
-  --bar-hi: #2ee6ff;
-  --track: #161b20;
-  --glow: 0 0 18px #2ee6ff55;
-  --display: "Archivo", "Arial Narrow", system-ui, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
-  --radius: 10px;
-  --gutter: 16px;
-  --max: 880px;
-  color-scheme: dark;
-}
-
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    --bg: #eceef1;
-    --surface: #ffffff;
-    --surface-2: #f4f5f7;
-    --rule: #c9cdd3;
-    --ink: #15181c;
-    --muted: #4f565e;
-    --line: #006b80;
-    --line-ink: #ffffff;
-    --good: #2d6a00;
-    --bad: #b0005a;
-    --bar: #a5aab2;
-    --bar-hi: #006b80;
-    --track: #e1e4e8;
-    --glow: none;
-    color-scheme: light;
-  }
-}
-:root[data-theme="light"] {
   --bg: #eceef1;
   --surface: #ffffff;
   --surface-2: #f4f5f7;
@@ -71,10 +29,15 @@
   --line-ink: #ffffff;
   --good: #2d6a00;
   --bad: #b0005a;
-  --bar: #a5aab2;
+  --bar: #7d848c;
   --bar-hi: #006b80;
-  --track: #e1e4e8;
+  --track: #eceef1;
   --glow: none;
+  --display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --radius: 10px;
+  --gutter: 16px;
+  --max: 880px;
   color-scheme: light;
 }
 
@@ -204,7 +167,6 @@ h1 {
 .btn:hover { border-color: var(--line); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-primary { background: var(--line); border-color: var(--line); color: var(--line-ink); }
-.btn-ghost { background: transparent; }
 .btn-small { min-height: 34px; padding: 6px 12px; font-size: 14px; font-family: var(--mono); font-stretch: 100%;
   text-transform: none; letter-spacing: 0; font-weight: 600; }
 
@@ -247,6 +209,8 @@ h1 {
 .bar-share {
   position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
   font-size: 12px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums;
+  /* a pill of the card color, so the label reads on any fill that reaches under it */
+  background: var(--surface); padding: 0 6px; border-radius: 4px;
 }
 .bar-axis { position: relative; height: 18px; border-top: 1px solid var(--rule); margin-top: -4px; }
 .tick { position: absolute; top: 2px; transform: translateX(-50%); font-size: 11px; color: var(--muted); }
@@ -274,7 +238,7 @@ h1 {
 .check { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .check.bad { color: var(--bad); font-weight: 700; }
 .mini { position: relative; height: 8px; }
-.mini-track { position: absolute; inset: 0; background: var(--bar); border-radius: 4px; }
+.mini-track { position: absolute; inset: 0; background: var(--track); border-radius: 4px; }
 .mini-fill { position: absolute; inset: 0 auto 0 0; background: var(--bar-hi); border-radius: 4px; }
 
 .raw-error { border: 0; padding: 0; background: none; }

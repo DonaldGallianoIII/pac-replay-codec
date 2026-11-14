@@ -24,7 +24,6 @@ const CONFIG = {
   SAMPLE: { best: 12.4, median: 11.4, worst: 10.2, files: 100 },
   PACKED_EXT: '.clrz',
   REPLAY_EXT: '.colreplay',
-  THEME_KEY: 'pac-replay-codec.theme',
   ZIP_NAME: 'pac-replay-codec-files.zip',
 };
 const KB = 1024;
@@ -57,7 +56,6 @@ const mounts = {
   chart: document.getElementById('chart'),
   list: document.getElementById('list'),
   actions: document.getElementById('actions'),
-  theme: document.getElementById('theme-toggle'),
   announce: document.getElementById('announce'),
 };
 /** Screen readers hear the progress at most once per this share of the batch, and once at the end. */
@@ -303,12 +301,13 @@ function renderHero(t) {
       el('span', { class: 'kv muted', text: `on ${CONFIG.SAMPLE.files} sample replays. Drop yours to see your number.` }),
     ];
   }
-  mounts.hero.replaceChildren(
+  // replaceChildren turns null into the text "null", so the optional line is filtered out first
+  mounts.hero.replaceChildren(...[
     pre ? el('div', { class: 'hero-pre', text: pre }) : null,
     el('div', { class: 'hero-line' }, el('span', { class: 'hero-num', text: big }),
       el('span', { class: 'hero-label', text: label })),
     el('div', { class: 'hero-sub' }, sub),
-  );
+  ].filter(Boolean));
 }
 
 /** @complexity O(1) */
@@ -482,29 +481,6 @@ async function filesFromEntries(entries) {
   return out;
 }
 
-/* ------------------------------------------------------------------- theme */
-
-function wireTheme() {
-  const root = document.documentElement;
-  let saved = null;
-  try { saved = localStorage.getItem(CONFIG.THEME_KEY); } catch { /* storage blocked: follow the system */ }
-  if (saved === 'light' || saved === 'dark') root.dataset.theme = saved;
-  const current = () => root.dataset.theme
-    || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
-  const label = () => {
-    const next = current() === 'dark' ? 'light' : 'dark';
-    mounts.theme.textContent = current() === 'dark' ? '☾ Dark theme' : '☀ Light theme';
-    mounts.theme.setAttribute('aria-label', `Switch to ${next} theme`);
-  };
-  mounts.theme.addEventListener('click', () => {
-    const next = current() === 'dark' ? 'light' : 'dark';
-    root.dataset.theme = next;
-    try { localStorage.setItem(CONFIG.THEME_KEY, next); } catch { /* not remembered, still switched */ }
-    label();
-  });
-  label();
-}
-
 /* --------------------------------------------------------------- lifecycle */
 
 function teardown() {
@@ -513,7 +489,6 @@ function teardown() {
 }
 
 wireDrop();
-wireTheme();
 renderSummary();
 // A page kept in the back/forward cache comes back with its workers and URLs intact, so only a real unload tears down.
 window.addEventListener('pagehide', (e) => { if (!e.persisted) teardown(); });
