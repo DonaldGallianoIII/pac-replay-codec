@@ -5,9 +5,13 @@
  *
  * Run: node --test test/hostile.test.ts
  *
- * @interacts src/index.ts (unpackReplay, packReplay); reads test/fixtures/synthetic-schema5.colreplay
- * @deps      node:test
- * @complexity about FUZZ_CASES unpack calls on inputs of at most a few KB, plus a handful of crafted headers
+ * Every test runs on every build of the codec (support.ts): the source and the packaged web/lib entries.
+ *
+ * @interacts support.ts (the builds); src/index.ts (packReplay and the limits); reads
+ *            test/fixtures/synthetic-schema5.colreplay
+ * @deps      support.ts, src/index.ts, node:test
+ * @complexity about FuzzCases unpack calls per build on inputs of at most a few KB, plus a handful of crafted
+ *            headers
  * @alloc     one small input per case; the memory check asserts nothing near MAX_ORIGINAL_BYTES is allocated
  * @rng       seeded LCG (Seed), so every run tries the same inputs
  */
@@ -15,7 +19,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { packReplay, unpackReplay, MAX_ORIGINAL_BYTES, EXPANSION_MAX, MODE_CODED, MODE_STORED, CONTAINER_MAGIC, FORMAT_VERSION, PREDICTORS_SCHEMA, PREDICTORS_PAC_MINIGAME } from '../src/index.ts';
+import { packReplay, MAX_ORIGINAL_BYTES, EXPANSION_MAX, MODE_CODED, MODE_STORED, CONTAINER_MAGIC, FORMAT_VERSION, PREDICTORS_SCHEMA, PREDICTORS_PAC_MINIGAME } from '../src/index.ts';
+import { BUILDS } from './support.ts';
 
 const CONFIG = Object.freeze({ Seed: 20261114, LcgA: 1664525, LcgC: 1013904223, FuzzCases: 2000, BodyMax: 2048,
   TimeoutMs: 60000, AllocSlackBytes: 64 * 1024 * 1024 });
@@ -59,29 +64,41 @@ function refusedWithoutAllocating(fn: () => unknown, label: string) {
 
 test('a coded file claiming more than MAX_ORIGINAL_BYTES is refused before allocating', () => {
   const body = randomBytes(MAX_ORIGINAL_BYTES / EXPANSION_MAX + 1024); // big enough that only the absolute cap applies
-  for (const predictors of [PREDICTORS_SCHEMA, PREDICTORS_PAC_MINIGAME]) {
-    refusedWithoutAllocating(() => unpackReplay(file(header(predictors, MODE_CODED, MAX_ORIGINAL_BYTES + 1), body)),
-      `claim of MAX_ORIGINAL_BYTES + 1, predictors ${predictors}`);
+  for (const b of BUILDS) {
+    const unpack = b.lib.unpackReplay;
+    for (const predictors of [PREDICTORS_SCHEMA, PREDICTORS_PAC_MINIGAME]) {
+      refusedWithoutAllocating(() => unpack(file(header(predictors, MODE_CODED, MAX_ORIGINAL_BYTES + 1), body)),
+        `${b.name}: claim of MAX_ORIGINAL_BYTES + 1, predictors ${predictors}`);
+    }
+    assert.throws(() => unpack(file(header(0, MODE_CODED, MAX_ORIGINAL_BYTES + 1), body)), /CLRZ header is damaged/, b.name);
   }
-  assert.throws(() => unpackReplay(file(header(0, MODE_CODED, MAX_ORIGINAL_BYTES + 1), body)), /CLRZ header is damaged/);
 });
 
 test('a coded file claiming more than EXPANSION_MAX bytes per packed byte is refused before allocating', () => {
   const body = randomBytes(100);
   const claim = (body.length + 1) * EXPANSION_MAX + 1;
-  refusedWithoutAllocating(() => unpackReplay(file(header(0, MODE_CODED, claim), body)), 'ratio claim just past the limit');
-  assert.throws(() => unpackReplay(file(header(0, MODE_CODED, claim), body)), /CLRZ header is damaged/);
-  // the largest varint the header can hold (7 bytes)
-  refusedWithoutAllocating(() => unpackReplay(file(header(0, MODE_CODED, 2 ** 49 - 1), body)), 'seven-byte size claim');
+  for (const b of BUILDS) {
+    const unpack = b.lib.unpackReplay;
+    refusedWithoutAllocating(() => unpack(file(header(0, MODE_CODED, claim), body)), `${b.name}: ratio claim just past the limit`);
+    assert.throws(() => unpack(file(header(0, MODE_CODED, claim), body)), /CLRZ header is damaged/, b.name);
+    // the largest varint the header can hold (7 bytes)
+    refusedWithoutAllocating(() => unpack(file(header(0, MODE_CODED, 2 ** 49 - 1), body)), `${b.name}: seven-byte size claim`);
+  }
 });
 
 test('a stored file whose size claim does not match its body is refused', () => {
-  refusedWithoutAllocating(() => unpackReplay(file(header(0, MODE_STORED, MAX_ORIGINAL_BYTES * 4), randomBytes(10))),
-    'stored claim of 1 GB on a 10 byte body');
+  const body = randomBytes(10);
+  for (const b of BUILDS) {
+    refusedWithoutAllocating(() => b.lib.unpackReplay(file(header(0, MODE_STORED, MAX_ORIGINAL_BYTES * 4), body)),
+      `${b.name}: stored claim of 1 GB on a 10 byte body`);
+  }
 });
 
 test('mode 2 names a starting model that was not given: refused', () => {
-  assert.throws(() => unpackReplay(file(header(0, MODE_PRIOR_BYTE, 1000), randomBytes(200))), /starting model/);
+  const body = randomBytes(200);
+  for (const b of BUILDS) {
+    assert.throws(() => b.lib.unpackReplay(file(header(0, MODE_PRIOR_BYTE, 1000), body)), /starting model/, b.name);
+  }
 });
 
 test('a normal replay still packs coded and unpacks under the limits', () => {
@@ -89,10 +106,10 @@ test('a normal replay still packs coded and unpacks under the limits', () => {
   const packed = packReplay(src);
   assert.equal(packed.mode, MODE_CODED);
   assert.equal(packed.error, null);
-  assert.deepEqual(unpackReplay(packed.bytes), new Uint8Array(src));
+  for (const b of BUILDS) assert.deepEqual(b.lib.unpackReplay(packed.bytes), new Uint8Array(src), b.name);
 });
 
-test(`fuzz: ${CONFIG.FuzzCases} random, truncated and flipped files all throw, none hangs`, { timeout: CONFIG.TimeoutMs }, () => {
+test(`fuzz: ${CONFIG.FuzzCases} random, truncated and flipped files all throw in every build, none hangs`, { timeout: CONFIG.TimeoutMs }, () => {
   const original = new Uint8Array(fs.readFileSync(path.join(import.meta.dirname, 'fixtures', 'synthetic-schema5.colreplay')));
   const good = packReplay(original).bytes;
   let returned = 0;
@@ -111,17 +128,19 @@ test(`fuzz: ${CONFIG.FuzzCases} random, truncated and flipped files all throw, n
       input = Uint8Array.from(good); // a real packed file with a few bytes changed
       for (let k = 0; k <= rnd(4); k++) input[rnd(input.length)] ^= 1 + rnd(255);
     }
-    let back: Uint8Array | null = null;
-    try {
-      back = unpackReplay(input);
-    } catch (e) {
-      assert.ok(e instanceof Error, `case ${i}: throws an Error, not ${typeof e}`);
-      continue;
+    for (const b of BUILDS) {
+      let back: Uint8Array | null = null;
+      try {
+        back = b.lib.unpackReplay(input);
+      } catch (e) {
+        assert.ok(e instanceof Error, `case ${i}, ${b.name}: throws an Error, not ${typeof e}`);
+        continue;
+      }
+      // a flip in the coder's final padding can leave the file valid; then it must be the real original
+      returned++;
+      assert.equal(kind, 3, `case ${i}, ${b.name}: only a flipped real file may unpack`);
+      assert.deepEqual(back, original, `case ${i}, ${b.name}: a file that unpacks gives exactly the original`);
     }
-    // a flip in the coder's final padding can leave the file valid; then it must be the real original
-    returned++;
-    assert.equal(kind, 3, `case ${i}: only a flipped real file may unpack`);
-    assert.deepEqual(back, original, `case ${i}: a file that unpacks gives exactly the original`);
   }
-  assert.ok(returned < CONFIG.FuzzCases / 40, `${returned} damaged files unpacked; only padding flips may`);
+  assert.ok(returned < (CONFIG.FuzzCases * BUILDS.length) / 40, `${returned} damaged files unpacked; only padding flips may`);
 });

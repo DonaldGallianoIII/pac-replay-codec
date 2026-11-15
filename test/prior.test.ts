@@ -6,59 +6,19 @@
  * Run: node --test test/prior.test.ts
  *
  * @interacts reads test/fixtures/synthetic-schema5.colreplay; writes nothing
- * @deps      src (index.ts, codec.ts, prior.ts, clrp.ts), node:test
+ * @deps      support.ts (the hand-made model), src (index.ts, codec.ts, prior.ts), node:test
  * @complexity about 10 pack and unpack calls on a 20 KB file
  * @alloc     one replay and its packed and unpacked forms at a time
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
-import crypto from 'node:crypto';
 import { packReplay, unpackReplay, parsePrior, MODE_CODED, MODE_PRIOR } from '../src/index.ts';
 import { Codec } from '../src/codec.ts';
-import { writePrior, stateCode, levelProbability, OWNER, SITE, CONTEXTS_UNCHECKED, PROB_LEVELS, COUNT_LEVELS } from '../src/prior.ts';
-import type { PriorParts } from '../src/prior.ts';
-import { firstHandshakeBody } from '../src/clrp.ts';
+import { writePrior, levelProbability, SITE, CONTEXTS_UNCHECKED, PROB_LEVELS, COUNT_LEVELS } from '../src/prior.ts';
+import { SYNTHETIC, sha, handMadePrior as handMade } from './support.ts';
 
-const SOURCE = path.join(import.meta.dirname, 'fixtures', 'synthetic-schema5.colreplay');
-const CONFIG = Object.freeze({ FixedModel: 1 });
-const sha = (u8: Uint8Array): string => crypto.createHash('sha256').update(u8).digest('hex');
-
-/** The body of a replay's handshake frame (its type table). */
-function typeTable(src: Uint8Array): Uint8Array {
-  const at = firstHandshakeBody(src);
-  assert.ok(at !== null);
-  return src.slice(at[0], at[1]);
-}
-
-/** Parts of a small hand-made prior for the replay's type table: two words, three fields, one block per key count. */
-function handMade(src: Uint8Array): PriorParts {
-  const enc = new TextEncoder();
-  const parts: PriorParts = {
-    model: CONFIG.FixedModel, contexts: 0, handshake: typeTable(src),
-    strings: [enc.encode('GAME_END'), enc.encode('PIKACHU'), enc.encode('WATER')],
-    fields: [
-      { owner: OWNER.MSGTYPE, key: 0, dict: [0] },
-      { owner: OWNER.FIELD, key: 385, dict: [1] },
-      { owner: OWNER.KEY, key: 328, dict: [2] },
-    ],
-    blocks: [
-      { site: SITE.HEAD_FLAG, a: 1300, b: 0, c: 0 },
-      { site: SITE.BYTE, a: 400, b: 0, c: 0 },
-      { site: SITE.BYTE_HI, a: 400, b: 0, c: 5 },
-      { site: SITE.BYTE_HI, a: 401, b: 2, c: 7 },
-      { site: SITE.FLOAT_HI, a: 786, b: 3, c: 0 },
-      { site: SITE.STR_HINT, a: 1, b: 0, c: 0 },
-    ],
-    states: [],
-  };
-  // the context count a file must record: load the draft into a coder that does not check it
-  const draft = { ...parsePrior(writePrior({ ...parts, contexts: 1 })), contexts: CONTEXTS_UNCHECKED };
-  parts.contexts = new Codec(new Uint8Array(0), true, { gameAware: false, account: false, rawLen: 0, prior: draft }).rc.used;
-  parts.states = [{ index: 70000, code: stateCode(5, 3) }, { index: parts.contexts - 1, code: stateCode(60, 0) }];
-  return parts;
-}
+const SOURCE = SYNTHETIC[1];
 
 /**
  * The format lock for the prior path: sha256 of the hand-made prior file below, and of the synthetic fixture

@@ -56,6 +56,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "esbuild": "0.28.2",
+    "pac-replay-codec-1.0.0": "npm:pac-replay-codec@1.0.0",
+    "pac-replay-codec-1.0.1": "npm:pac-replay-codec@1.0.1",
+    "terser": "5.51.2",
     "typescript": "^7.0.2"
   }
 }
