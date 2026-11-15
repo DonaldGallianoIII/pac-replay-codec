@@ -239,163 +239,87 @@ export class RangeCoder {
   }
 
   /**
+   * Move context i toward bit b without coding anything: the update every coded bit ends with, for a context that
+   * only learns from a bit coded under another.
+   * @complexity O(1) @alloc none
+   */
+  private learn(i: number, b: number): void {
+    const st = this.st;
+    const s = st[i] ^ STATE_FLIP;
+    let p = s >>> PROB_BITS;
+    const n = s & COUNT_MASK;
+    if (b !== 0) p += ((PROB_MAX - p) * RATE[n]) >>> PROB_BITS;
+    else p -= (p * RATE[n]) >>> PROB_BITS;
+    st[i] = ((p << PROB_BITS) | (n < COUNT_LIMIT ? n + 1 : n)) ^ STATE_FLIP;
+  }
+
+  /**
    * Code one bit choosing between a specific context (hi) and a general one (lo): hi is used once it has been seen
    * `minCount` times, both learn every time. Returns the bit.
    * @complexity O(1) @alloc none
    */
   bit2(hi: number, lo: number, b: number, minCount: number): number {
     if (hi === lo) return this.bit(hi, b);
-    const st = this.st;
-    const useHi = (st[hi] & COUNT_MASK) >= minCount;
+    const useHi = (this.st[hi] & COUNT_MASK) >= minCount;
     b = this.bit(useHi ? hi : lo, b);
     if (useHi && (MEASURE ? this.lazy : LAZY_BACKOFF)) return b;
     // the context that was not used still learns, without coding
     const other = useHi ? lo : hi;
     if (MEASURE && this.account !== null && this.watch !== null) this.watch(other, b, 0);
-    const s = st[other] ^ STATE_FLIP;
-    let p = s >>> PROB_BITS;
-    const n = s & COUNT_MASK;
-    if (b !== 0) p += ((PROB_MAX - p) * RATE[n]) >>> PROB_BITS;
-    else p -= (p * RATE[n]) >>> PROB_BITS;
-    st[other] = ((p << PROB_BITS) | (n < COUNT_LIMIT ? n + 1 : n)) ^ STATE_FLIP;
+    this.learn(other, b);
     return b;
   }
 
   /**
    * Code an nbits wide symbol with a bit tree of contexts rooted at `base` (2^nbits contexts): node 1 is the root,
-   * the children of node k are 2k and 2k+1. Returns the symbol. Same bits as nbits calls of bit(); written out
-   * here so that range, low and code stay in locals for the whole symbol.
+   * the children of node k are 2k and 2k+1. Returns the symbol. Same bits as nbits calls of bit(). It is the tree
+   * with backoff whose two blocks are the same one, so it runs that loop.
    * @complexity O(nbits) @alloc none
    */
   tree(base: number, nbits: number, v: number): number {
-    let node = 1;
-    if (MEASURE && this.account !== null) {
-      for (let k = nbits - 1; k >= 0; k--) node = (node << 1) | this.bit(base + node, (v >>> k) & 1);
-      return node - (1 << nbits);
-    }
-    const st = this.st;
-    let r = this.range;
-    if (ENCODE && this.enc) {
-      let low = this.low;
-      for (let k = nbits - 1; k >= 0; k--) {
-        const i = base + node;
-        const s = st[i] ^ STATE_FLIP;
-        let p = s >>> PROB_BITS;
-        const n = s & COUNT_MASK;
-        const bound = Math.imul(r >>> PROB_BITS, p);
-        const b = (v >>> k) & 1;
-        if (b !== 0) {
-          r = bound;
-          p += ((PROB_MAX - p) * RATE[n]) >>> PROB_BITS;
-        } else {
-          low = (low + bound) | 0;
-          if (low >>> 0 < bound >>> 0) this.carry();
-          r = (r - bound) | 0;
-          p -= (p * RATE[n]) >>> PROB_BITS;
-        }
-        while (r >>> 0 < RANGE_MIN) {
-          if (this.outLen === this.out.length) this.growOut();
-          this.out[this.outLen++] = low >>> WORD_TOP_SHIFT;
-          low <<= BYTE_SHIFT;
-          r <<= BYTE_SHIFT;
-        }
-        st[i] = ((p << PROB_BITS) | (n < COUNT_LIMIT ? n + 1 : n)) ^ STATE_FLIP;
-        node = (node << 1) | b;
-      }
-      this.low = low;
-    } else {
-      let code = this.code;
-      for (let k = nbits - 1; k >= 0; k--) {
-        const i = base + node;
-        const s = st[i] ^ STATE_FLIP;
-        let p = s >>> PROB_BITS;
-        const n = s & COUNT_MASK;
-        const bound = Math.imul(r >>> PROB_BITS, p);
-        let b: number;
-        if (code >>> 0 < bound >>> 0) {
-          r = bound;
-          b = 1;
-          p += ((PROB_MAX - p) * RATE[n]) >>> PROB_BITS;
-        } else {
-          code = (code - bound) | 0;
-          r = (r - bound) | 0;
-          b = 0;
-          p -= (p * RATE[n]) >>> PROB_BITS;
-        }
-        while (r >>> 0 < RANGE_MIN) {
-          code = (code << BYTE_SHIFT) | (this.ip < this.inp.length ? this.inp[this.ip++] : this.pad());
-          r <<= BYTE_SHIFT;
-        }
-        st[i] = ((p << PROB_BITS) | (n < COUNT_LIMIT ? n + 1 : n)) ^ STATE_FLIP;
-        node = (node << 1) | b;
-      }
-      this.code = code;
-    }
-    this.range = r;
-    return node - (1 << nbits);
+    return this.tree2(base, base, nbits, v, 0);
   }
 
   /**
    * Bit tree with backoff: each node is coded under the specific block `hi` once that node has been seen
    * `minCount` times, else under the general block `lo`; both learn. Returns the symbol. Same bits as nbits calls
-   * of bit2().
+   * of bit2(); written out here so that range, low and code stay in locals for the whole symbol. With hi equal to
+   * lo it is a plain bit tree: one context per node.
    * @complexity O(nbits) @alloc none
    */
   tree2(hi: number, lo: number, nbits: number, v: number, minCount: number): number {
     let node = 1;
-    if ((MEASURE && this.account !== null) || hi === lo) {
+    if (MEASURE && this.account !== null) {
       for (let k = nbits - 1; k >= 0; k--) node = (node << 1) | this.bit2(hi + node, lo + node, (v >>> k) & 1, minCount);
       return node - (1 << nbits);
     }
     const st = this.st;
+    const single = hi === lo;
     const lazy = MEASURE ? this.lazy : LAZY_BACKOFF;
     let r = this.range;
     if (ENCODE && this.enc) {
       let low = this.low;
       for (let k = nbits - 1; k >= 0; k--) {
-        const ih = hi + node;
-        const sh = st[ih] ^ STATE_FLIP;
-        let ph = sh >>> PROB_BITS;
-        const nh = sh & COUNT_MASK;
-        const useHi = nh >= minCount;
-        const b = (v >>> k) & 1;
-        if (useHi && lazy) {
-          // the specific context alone
-          const bound = Math.imul(r >>> PROB_BITS, ph);
-          if (b !== 0) {
-            r = bound;
-            ph += ((PROB_MAX - ph) * RATE[nh]) >>> PROB_BITS;
-          } else {
-            low = (low + bound) | 0;
-            if (low >>> 0 < bound >>> 0) this.carry();
-            r = (r - bound) | 0;
-            ph -= (ph * RATE[nh]) >>> PROB_BITS;
-          }
-          while (r >>> 0 < RANGE_MIN) {
-            if (this.outLen === this.out.length) this.growOut();
-            this.out[this.outLen++] = low >>> WORD_TOP_SHIFT;
-            low <<= BYTE_SHIFT;
-            r <<= BYTE_SHIFT;
-          }
-          st[ih] = ((ph << PROB_BITS) | (nh < COUNT_LIMIT ? nh + 1 : nh)) ^ STATE_FLIP;
-          node = (node << 1) | b;
-          continue;
+        // the context the bit is coded under: the specific one when it is in use (or the only one), else the general
+        let i = hi + node;
+        let s = st[i] ^ STATE_FLIP;
+        const useHi = single || (s & COUNT_MASK) >= minCount;
+        if (!useHi) {
+          i = lo + node;
+          s = st[i] ^ STATE_FLIP;
         }
-        const il = lo + node;
-        const sl = st[il] ^ STATE_FLIP;
-        let pl = sl >>> PROB_BITS;
-        const nl = sl & COUNT_MASK;
-        const bound = Math.imul(r >>> PROB_BITS, useHi ? ph : pl);
+        let p = s >>> PROB_BITS;
+        const n = s & COUNT_MASK;
+        const bound = Math.imul(r >>> PROB_BITS, p);
+        const b = (v >>> k) & 1;
         if (b !== 0) {
           r = bound;
-          ph += ((PROB_MAX - ph) * RATE[nh]) >>> PROB_BITS;
-          pl += ((PROB_MAX - pl) * RATE[nl]) >>> PROB_BITS;
+          p += ((PROB_MAX - p) * RATE[n]) >>> PROB_BITS;
         } else {
           low = (low + bound) | 0;
           if (low >>> 0 < bound >>> 0) this.carry();
           r = (r - bound) | 0;
-          ph -= (ph * RATE[nh]) >>> PROB_BITS;
-          pl -= (pl * RATE[nl]) >>> PROB_BITS;
+          p -= (p * RATE[n]) >>> PROB_BITS;
         }
         while (r >>> 0 < RANGE_MIN) {
           if (this.outLen === this.out.length) this.growOut();
@@ -403,64 +327,42 @@ export class RangeCoder {
           low <<= BYTE_SHIFT;
           r <<= BYTE_SHIFT;
         }
-        st[ih] = ((ph << PROB_BITS) | (nh < COUNT_LIMIT ? nh + 1 : nh)) ^ STATE_FLIP;
-        st[il] = ((pl << PROB_BITS) | (nl < COUNT_LIMIT ? nl + 1 : nl)) ^ STATE_FLIP;
+        st[i] = ((p << PROB_BITS) | (n < COUNT_LIMIT ? n + 1 : n)) ^ STATE_FLIP;
+        // the context that was not used still learns, without coding
+        if (!single && !(useHi && lazy)) this.learn(useHi ? lo + node : hi + node, b);
         node = (node << 1) | b;
       }
       this.low = low;
     } else {
       let code = this.code;
       for (let k = nbits - 1; k >= 0; k--) {
-        const ih = hi + node;
-        const sh = st[ih] ^ STATE_FLIP;
-        let ph = sh >>> PROB_BITS;
-        const nh = sh & COUNT_MASK;
-        const useHi = nh >= minCount;
-        let b: number;
-        if (useHi && lazy) {
-          // the specific context alone
-          const bound = Math.imul(r >>> PROB_BITS, ph);
-          if (code >>> 0 < bound >>> 0) {
-            r = bound;
-            b = 1;
-            ph += ((PROB_MAX - ph) * RATE[nh]) >>> PROB_BITS;
-          } else {
-            code = (code - bound) | 0;
-            r = (r - bound) | 0;
-            b = 0;
-            ph -= (ph * RATE[nh]) >>> PROB_BITS;
-          }
-          while (r >>> 0 < RANGE_MIN) {
-            code = (code << BYTE_SHIFT) | (this.ip < this.inp.length ? this.inp[this.ip++] : this.pad());
-            r <<= BYTE_SHIFT;
-          }
-          st[ih] = ((ph << PROB_BITS) | (nh < COUNT_LIMIT ? nh + 1 : nh)) ^ STATE_FLIP;
-          node = (node << 1) | b;
-          continue;
+        let i = hi + node;
+        let s = st[i] ^ STATE_FLIP;
+        const useHi = single || (s & COUNT_MASK) >= minCount;
+        if (!useHi) {
+          i = lo + node;
+          s = st[i] ^ STATE_FLIP;
         }
-        const il = lo + node;
-        const sl = st[il] ^ STATE_FLIP;
-        let pl = sl >>> PROB_BITS;
-        const nl = sl & COUNT_MASK;
-        const bound = Math.imul(r >>> PROB_BITS, useHi ? ph : pl);
+        let p = s >>> PROB_BITS;
+        const n = s & COUNT_MASK;
+        const bound = Math.imul(r >>> PROB_BITS, p);
+        let b: number;
         if (code >>> 0 < bound >>> 0) {
           r = bound;
           b = 1;
-          ph += ((PROB_MAX - ph) * RATE[nh]) >>> PROB_BITS;
-          pl += ((PROB_MAX - pl) * RATE[nl]) >>> PROB_BITS;
+          p += ((PROB_MAX - p) * RATE[n]) >>> PROB_BITS;
         } else {
           code = (code - bound) | 0;
           r = (r - bound) | 0;
           b = 0;
-          ph -= (ph * RATE[nh]) >>> PROB_BITS;
-          pl -= (pl * RATE[nl]) >>> PROB_BITS;
+          p -= (p * RATE[n]) >>> PROB_BITS;
         }
         while (r >>> 0 < RANGE_MIN) {
           code = (code << BYTE_SHIFT) | (this.ip < this.inp.length ? this.inp[this.ip++] : this.pad());
           r <<= BYTE_SHIFT;
         }
-        st[ih] = ((ph << PROB_BITS) | (nh < COUNT_LIMIT ? nh + 1 : nh)) ^ STATE_FLIP;
-        st[il] = ((pl << PROB_BITS) | (nl < COUNT_LIMIT ? nl + 1 : nl)) ^ STATE_FLIP;
+        st[i] = ((p << PROB_BITS) | (n < COUNT_LIMIT ? n + 1 : n)) ^ STATE_FLIP;
+        if (!single && !(useHi && lazy)) this.learn(useHi ? lo + node : hi + node, b);
         node = (node << 1) | b;
       }
       this.code = code;

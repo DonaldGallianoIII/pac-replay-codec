@@ -6,7 +6,9 @@
  * The builds take turns, round after round, so a busy minute on the machine hits all of them alike. A build that
  * cannot pack (the unpack-only file) is handed files packed by the first build that can.
  *
- * Usage: node tools/bench.mjs --replays DIR [--files 10] [--rounds 5] [--passes 3] BUILD [BUILD ...]
+ * Usage: node tools/bench.mjs --replays DIR [--files 10] [--rounds 5] [--passes 3] [--cpu N] BUILD [BUILD ...]
+ *        --cpu N pins every timed process to core N (Linux, taskset): on a shared machine it removes most of the
+ *        run-to-run noise
  *        BUILD is a module that exports unpackReplay and maybe packReplay, as a path or a package name:
  *        node tools/bench.mjs --replays ~/replays pac-replay-codec-1.0.1 web/lib/index.js web/lib/decode.js
  *
@@ -69,6 +71,7 @@ const dir = option('--replays', '');
 const files = Number(option('--files', CONFIG.Files));
 const rounds = Number(option('--rounds', CONFIG.Rounds));
 const passes = Number(option('--passes', CONFIG.Passes));
+const cpu = option('--cpu', null);
 
 if (childOf !== null) {
   const packerName = option('--packer', null);
@@ -76,14 +79,17 @@ if (childOf !== null) {
 } else {
   const builds = args;
   if (dir === '' || builds.length === 0) {
-    console.error('usage: node tools/bench.mjs --replays DIR [--files 10] [--rounds 5] [--passes 3] BUILD [BUILD ...]');
+    console.error('usage: node tools/bench.mjs --replays DIR [--files 10] [--rounds 5] [--passes 3] [--cpu N] BUILD [BUILD ...]');
     process.exit(2);
   }
   // the first build is the packer for builds that cannot pack; it must be able to
   const results = builds.map(() => ({ pack: [], unpack: [] }));
   for (let r = 0; r < rounds; r++) {
     for (let i = 0; i < builds.length; i++) {
-      const run = spawnSync(process.execPath, [SELF, '--child', builds[i], '--packer', builds[0], '--replays', dir, '--files', String(files), '--passes', String(passes)], { encoding: 'utf8' });
+      const childArgs = [SELF, '--child', builds[i], '--packer', builds[0], '--replays', dir, '--files', String(files), '--passes', String(passes)];
+      const run = cpu === null
+        ? spawnSync(process.execPath, childArgs, { encoding: 'utf8' })
+        : spawnSync('taskset', ['-c', cpu, process.execPath, ...childArgs], { encoding: 'utf8' });
       if (run.status !== 0) {
         console.error(run.stderr);
         process.exit(1);

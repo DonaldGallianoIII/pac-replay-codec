@@ -13,17 +13,22 @@
  *   2. bundle   esbuild joins the modules into one file and lowers the syntax to CONFIG.Target.
  *   3. cut      a method whose doc block says `@build encode` (or measure, prior) is left out of a build that
  *               lacks that capability. Methods are the one thing a minifier cannot drop on its own.
- *   4. minify   terser folds the constants, drops what is now unreachable, and renames every variable and every
- *               property of our own. Two lists say what is not ours to rename: CONFIG.PublicNames (what crosses
- *               the package boundary) and CONFIG.BuiltinNames (members of JavaScript's own objects).
- *   5. checks   on the minified code before renaming, where names are still the source's:
+ *   4. compress terser folds the constants and drops what is now unreachable. Names are left alone in this pass,
+ *               on purpose: told that names will be one letter, terser stops writing a constant out where it is
+ *               used and keeps it in a variable (`var i=128`), because the letter is shorter than the number.
+ *               The engine cannot fold a variable, and the coder's shifts and masks are such constants: that
+ *               one-pass build measured 8 to 12% slower than this one, and no smaller after gzip.
+ *   5. checks   on that compressed code, where names are still the source's:
  *               a. nothing may still refer to a method that was cut;
  *               b. a property the code reads but never defines must be on one of the two lists (it can only
  *                  come from outside);
  *               c. a property the code defines that is also the name of a JavaScript built-in member must be on
  *                  a list too, so a call on a typed array can never be renamed along with ours;
  *               d. the code names no host object (window, process, console ...): the codec is pure.
- *               And the final output must parse as CONFIG.EcmaVersion. Any of them failing stops the build.
+ *   6. rename   terser again, renaming only: every variable and every property of our own gets a short name.
+ *               Two lists say what is not ours to rename: CONFIG.PublicNames (what crosses the package boundary)
+ *               and CONFIG.BuiltinNames (members of JavaScript's own objects).
+ *   The final output must parse as CONFIG.EcmaVersion. Any check failing stops the build.
  * The same source, with every flag on, runs unbuilt under Node for the tests.
  *
  * Usage: node tools/build-web.mjs               write web/lib/
@@ -35,7 +40,7 @@
  * @deps      esbuild, terser, acorn (dev dependencies, pinned to exact versions so the output is reproducible),
  *            node:fs, node:path, node:url, node:zlib (only for --sizes)
  * @complexity O(S) per build, S the size of src/ (about 280 KB): three builds, a few seconds in all
- * @alloc     the bundle and its syntax tree, twice per build, released when the build returns
+ * @alloc     the bundle, its compressed and renamed forms and one syntax tree per build, released on return
  */
 import { build } from 'esbuild';
 import { minify } from 'terser';
@@ -276,8 +281,11 @@ function cutMethods(code, flags, tags) {
   return { code: out, cut };
 }
 
-/** Options of the minifier, shared by the real pass and the unrenamed pass the reference check reads. */
-function terserOptions(rename, map) {
+/**
+ * Options of the compressing pass (step 4): fold, drop dead code, rename nothing.
+ * @param map the bundle's source map, carried through
+ */
+function compressOptions(map) {
   return {
     module: true,
     ecma: CONFIG.EcmaVersion,
@@ -295,21 +303,36 @@ function terserOptions(rename, map) {
       // the public calls return real booleans
       booleans_as_integers: false,
     },
-    // builtins: true lets terser rename names it would otherwise spare for being some browser API's; the two
-    // lists and the checks are what make that safe here
-    mangle: rename ? { module: true, toplevel: true, properties: { builtins: true, reserved: [...CONFIG.PublicNames, ...CONFIG.BuiltinNames], keep_quoted: true } } : false,
-    format: { ecma: CONFIG.EcmaVersion, comments: false, preamble: rename ? BANNER : undefined },
-    sourceMap: map === null ? false : { content: map, asObject: true, includeSources: false },
+    mangle: false,
+    format: { ecma: CONFIG.EcmaVersion, comments: false },
+    sourceMap: { content: map, asObject: true, includeSources: false },
   };
 }
 
 /**
- * Step 5, checks a to d, on the minified code before renaming (dead code is gone, names are still the source's).
- * @returns {Promise<string>} that unrenamed code, for --plain
+ * Options of the renaming pass (step 6): nothing but short names, and the banner on top.
+ * @param map the source map of the compressed code, carried through
+ */
+function renameOptions(map) {
+  return {
+    module: true,
+    ecma: CONFIG.EcmaVersion,
+    toplevel: true,
+    compress: false,
+    // builtins: true lets terser rename names it would otherwise spare for being some browser API's; the two
+    // lists and the checks are what make that safe here
+    mangle: { module: true, toplevel: true, properties: { builtins: true, reserved: [...CONFIG.PublicNames, ...CONFIG.BuiltinNames], keep_quoted: true } },
+    format: { ecma: CONFIG.EcmaVersion, comments: false, preamble: BANNER },
+    sourceMap: { content: map, asObject: true, includeSources: false },
+  };
+}
+
+/**
+ * Step 5, checks a to d, on the compressed code before renaming (dead code is gone, names are still the source's).
+ * @param plain the compressed code @param cut the methods cut from this build @param out the file, for messages
  * @complexity O(bundle) @alloc one syntax tree and three sets of names
  */
-async function checkNames(code, cut, out) {
-  const plain = await minify(code, terserOptions(false, null));
+function checkNames(plain, cut, out) {
   const cutNames = new Set(cut);
   const reserved = new Set([...CONFIG.PublicNames, ...CONFIG.BuiltinNames]);
   const hosts = new Set(CONFIG.HostNames);
@@ -318,7 +341,7 @@ async function checkNames(code, cut, out) {
   const stillCut = new Set();
   const hostHits = new Set();
   const keyName = (k) => (k.type === 'Identifier' ? k.name : String(k.value));
-  walk(parse(plain.code, { ecmaVersion: 'latest', sourceType: 'module' }), (n) => {
+  walk(parse(plain, { ecmaVersion: 'latest', sourceType: 'module' }), (n) => {
     if (n.type === 'MemberExpression' && !n.computed) {
       used.add(n.property.name);
       if (cutNames.has(n.property.name)) stillCut.add(n.property.name);
@@ -340,12 +363,11 @@ async function checkNames(code, cut, out) {
   const standard = standardMemberNames();
   fail('defines properties named like a JavaScript built-in member; rename them or add them to CONFIG.BuiltinNames', [...defined].filter((n) => standard.has(n) && !reserved.has(n)));
   fail('names a host object; the codec must stay pure', [...hostHits]);
-  return plain.code;
 }
 
 /**
  * Build every entry of CONFIG.Builds in memory.
- * @returns {Promise<{ out: string, code: string, map: string, plain: string }[]>} plain is the minified code
+ * @returns {Promise<{ out: string, code: string, map: string, plain: string }[]>} plain is the compressed code
  *          before renaming, for reading what the build kept
  * @complexity O(S) per build @alloc the outputs
  */
@@ -355,11 +377,12 @@ export async function buildAll() {
   for (const { out, entry, flags } of CONFIG.Builds) {
     const joined = await bundle(entry, flags, out);
     const { code, cut } = cutMethods(joined.code, flags, tags);
-    const plain = await checkNames(code, cut, out);
-    const small = await minify(code, terserOptions(true, joined.map));
+    const plain = await minify(code, compressOptions(joined.map));
+    checkNames(plain.code, cut, out);
+    const small = await minify(plain.code, renameOptions(plain.map));
     // the last check: the output is ES2016 and nothing newer
     parse(small.code, { ecmaVersion: CONFIG.EcmaVersion, sourceType: 'module' });
-    outputs.push({ out, code: `${small.code}\n`, map: JSON.stringify(small.map), plain });
+    outputs.push({ out, code: `${small.code}\n`, map: JSON.stringify(small.map), plain: plain.code });
   }
   return outputs;
 }
