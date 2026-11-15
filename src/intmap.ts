@@ -10,11 +10,13 @@
  * at all, two array reads per lookup.
  *
  * @interacts none
- * @deps      none (the `@build` tags on a few methods are read by tools/build-web.mjs, see build.ts)
+ * @deps      arrays.ts (withRoom); the `@build` tags on a few methods are read by tools/build-web.mjs, see build.ts
  * @complexity get, set, intern: O(1) expected, O(length) for the byte hash and compare of intern; Rows.entry O(1)
  * @alloc     tables double when half full; the string pool's byte store doubles when full; Rows adds one row of
  *            `width` integers the first time an id is used
  */
+
+import { withRoom } from './arrays.ts';
 
 /** Odd multipliers for mixing two keys into a table index (golden-ratio constants; any odd numbers would do). */
 const MIX_A = 0x9e3779b1;
@@ -167,14 +169,8 @@ export class Rows {
       r = this.used;
       this.used += this.width;
       if (this.used > this.ctx.length) {
-        let cap = this.ctx.length * 2;
-        while (cap < this.used) cap *= 2;
-        const c = new Int32Array(cap);
-        c.set(this.ctx);
-        this.ctx = c;
-        const a = new Int32Array(cap);
-        a.set(this.aux);
-        this.aux = a;
+        this.ctx = withRoom(this.ctx, this.used);
+        this.aux = withRoom(this.aux, this.used);
       }
       this.rowOf[id] = r;
     }
@@ -276,13 +272,7 @@ export class Recency {
   }
 
   private place(item: number, slot: number): void {
-    if (item >= this.slotOf.length) {
-      let n = this.slotOf.length * 2;
-      while (n <= item) n *= 2;
-      const so = new Int32Array(n);
-      so.set(this.slotOf);
-      this.slotOf = so;
-    }
+    if (item >= this.slotOf.length) this.slotOf = withRoom(this.slotOf, item + 1);
     this.itemAt[slot] = item + 1;
     this.slotOf[item] = slot;
     this.add(slot, 1);
@@ -401,25 +391,11 @@ export class StringPool {
     const id = this.count;
     const len = e - s;
     const at = this.start[id];
-    if (at + len > this.chars.length) {
-      let cap = this.chars.length * 2;
-      while (cap < at + len) cap *= 2;
-      const nb = new Uint8Array(cap);
-      nb.set(this.chars.subarray(0, at));
-      this.chars = nb;
-    }
+    if (at + len > this.chars.length) this.chars = withRoom(this.chars, at + len);
     for (let k = 0; k < len; k++) this.chars[at + k] = b[s + k];
-    if (id + 2 > this.start.length) {
-      const ns = new Int32Array(this.start.length * 2);
-      ns.set(this.start);
-      this.start = ns;
-    }
+    if (id + 2 > this.start.length) this.start = withRoom(this.start, id + 2);
     this.start[id + 1] = at + len;
-    if (id >= this.hashes.length) {
-      const nh = new Int32Array(this.hashes.length * 2);
-      nh.set(this.hashes);
-      this.hashes = nh;
-    }
+    if (id >= this.hashes.length) this.hashes = withRoom(this.hashes, id + 1);
     this.hashes[id] = this.lastHash;
     this.count = id + 1;
     if (this.count * 2 > this.mask) this.rehash();

@@ -20,10 +20,11 @@
  * Version 5 only appends, so one reader handles both. PAC 6.11 ships schema 4; PAC master and v7 ship schema 5.
  *
  * @interacts none (pure)
- * @deps      none
+ * @deps      build.ts (MEASURE: the text of a refusal is kept only where someone reads it)
  * @complexity parseReflection is O(T + F): T types (1,154 in PAC 6.11.2), F fields (290)
  * @alloc     the type table, kept for the life of one replay
  */
+import { MEASURE } from './build.ts';
 
 // wire markers and operations
 export const SWITCH_TO_STRUCTURE = 255;
@@ -129,49 +130,65 @@ export class Schema {
   root = 0;
 }
 
-/** Where the last readNumber or stringStart call ended (the byte after the token). */
+/** Where the last readInt or stringStart call ended (the byte after the token). */
 export const cursor = { end: 0 };
 
-const scratch = new DataView(new ArrayBuffer(8));
-
-/** Bytes that follow a `number` prefix byte, or -1 when the prefix is not a number. @complexity O(1) @alloc none */
-export function numberPayloadBytes(prefix: number): number {
-  if (prefix < 0x80 || prefix > 0xdf) return 0;
-  switch (prefix) {
-    case 0xcc: case 0xd0: return 1;
-    case 0xcd: case 0xd1: return 2;
-    case 0xca: case 0xce: case 0xd2: return 4;
-    case 0xcb: case 0xcf: case 0xd3: return 8;
-    default: return -1;
-  }
+/**
+ * The error for a type table this reader does not accept. No user ever sees its text: the codec catches it and
+ * keeps the frames as plain bytes. The text is for whoever runs a build from source; a packaged build drops it.
+ * @complexity O(1) @alloc one Error
+ */
+function refuse(why: string): Error {
+  return new Error(MEASURE ? why : '');
 }
 
+/** Largest integer magnitude the reflection reader accepts: beyond it a double is no longer exact. */
+const INT_EXACT_MAX = 9007199254740992;
+/** First prefix of the sized integers: 0xcc to 0xcf are unsigned in 1, 2, 4, 8 bytes, 0xd0 to 0xd3 signed. */
+const SIZED_INT_FIRST = 0xcc;
+const SIZED_INT_COUNT = 8;
+const SIZES_PER_SIGN = 4;
+const WORD_BYTES = 4;
+const WORD_BITS = 32;
+const BYTE_BITS = 8;
+const BYTE_VALUES = 256;
+const TWO_POW_32 = 4294967296;
+
 /**
- * Read a `number` at p (bounded by end). Returns its value; sets cursor.end. Throws on a prefix that is not a
- * number or a payload that runs past `end`.
+ * Read an integer `number` at p (bounded by end): any integer spelling, never a float, magnitude below 2^53.
+ * Returns its value; sets cursor.end. Throws on anything else.
  * @complexity O(1) @alloc none
  */
-export function readNumber(b: Uint8Array, p: number, end: number): number {
-  if (p >= end) throw new Error('number past the end');
+export function readInt(b: Uint8Array, p: number, end: number): number {
+  if (p >= end) throw refuse('number past the end');
   const prefix = b[p];
-  if (prefix < 0x80) { cursor.end = p + 1; return prefix; }
-  if (prefix > 0xdf) { cursor.end = p + 1; return prefix - 0x100; }
-  const n = numberPayloadBytes(prefix);
-  if (n < 0 || p + 1 + n > end) throw new Error('bad number');
-  cursor.end = p + 1 + n;
-  if (prefix === 0xcc) return b[p + 1];
-  if (prefix === 0xcd) return b[p + 1] | (b[p + 2] << 8);
-  for (let i = 0; i < n; i++) scratch.setUint8(i, b[p + 1 + i]);
-  switch (prefix) {
-    case 0xce: return scratch.getUint32(0, true);
-    case 0xcf: return scratch.getUint32(0, true) + scratch.getUint32(4, true) * 4294967296;
-    case 0xd0: return scratch.getInt8(0);
-    case 0xd1: return scratch.getInt16(0, true);
-    case 0xd2: return scratch.getInt32(0, true);
-    case 0xd3: return scratch.getUint32(0, true) + scratch.getInt32(4, true) * 4294967296;
-    case 0xca: return scratch.getFloat32(0, true);
-    default: return scratch.getFloat64(0, true);
+  let n = 0;
+  let v: number;
+  if (prefix < 0x80) v = prefix;
+  else if (prefix > 0xdf) v = prefix - 0x100;
+  else {
+    const size = prefix - SIZED_INT_FIRST;
+    // 0xca and 0xcb are floats; the rest of 0x80 to 0xdf is no number at all
+    if (size < 0 || size >= SIZED_INT_COUNT) throw refuse('reflection: not an integer');
+    n = 1 << (size % SIZES_PER_SIGN);
+    if (p + 1 + n > end) throw refuse('bad number');
+    // little endian: the low word in the first four bytes, the high word in the next four
+    let lo = 0;
+    let hi = 0;
+    for (let k = n - 1; k >= 0; k--) {
+      if (k < WORD_BYTES) lo = lo * BYTE_VALUES + b[p + 1 + k];
+      else hi = hi * BYTE_VALUES + b[p + 1 + k];
+    }
+    if (size >= SIZES_PER_SIGN) {
+      // signed: the top word is read as two's complement
+      if (n > WORD_BYTES) hi |= 0;
+      else lo = (lo << (WORD_BITS - n * BYTE_BITS)) >> (WORD_BITS - n * BYTE_BITS);
+    }
+    v = lo + hi * TWO_POW_32;
   }
+  if (!(v > -INT_EXACT_MAX && v < INT_EXACT_MAX)) throw refuse('reflection: integer out of range');
+  cursor.end = p + 1 + n;
+  return v;
 }
 
 /**
@@ -181,7 +198,7 @@ export function readNumber(b: Uint8Array, p: number, end: number): number {
  * @complexity O(1) @alloc none
  */
 export function stringStart(b: Uint8Array, p: number, end: number): number {
-  if (p >= end) throw new Error('string past the end');
+  if (p >= end) throw refuse('string past the end');
   const prefix = b[p];
   let len: number;
   let start: number;
@@ -189,16 +206,14 @@ export function stringStart(b: Uint8Array, p: number, end: number): number {
   else if (prefix === 0xd9) { len = b[p + 1]; start = p + 2; }
   else if (prefix === 0xda) { len = b[p + 1] | (b[p + 2] << 8); start = p + 3; }
   else if (prefix === 0xdb) { len = (b[p + 1] | (b[p + 2] << 8) | (b[p + 3] << 16)) + b[p + 4] * 0x1000000; start = p + 5; }
-  else throw new Error('bad string prefix');
-  if (start + len > end) throw new Error('string past the end');
+  else throw refuse('bad string prefix');
+  if (start + len > end) throw refuse('string past the end');
   cursor.end = start + len;
   return start;
 }
 
 /** Sentinel for a number field the reflection did not set. */
 const UNSET = -1;
-/** Largest integer magnitude the reflection reader accepts: beyond it a double is no longer exact. */
-const INT_EXACT_MAX = 9007199254740992;
 /** Largest refId the reflection reader accepts. */
 const REFLECTION_REF_MAX = 16777216;
 
@@ -236,7 +251,7 @@ export function bootSchema(): Schema {
 
 function primId(name: string): number {
   const id = PRIM_IDS[name];
-  if (id === undefined) throw new Error(`unknown primitive type "${name}"`);
+  if (id === undefined) throw refuse(`unknown primitive type "${name}"`);
   return id;
 }
 
@@ -246,7 +261,7 @@ function buildSchema(raw: RawType[], rootId: number): Schema {
   const n = raw.length;
   let maxId = 0;
   for (const t of raw) {
-    if (t.id < 0 || t.id > TYPE_ID_MAX) throw new Error('bad type id');
+    if (t.id < 0 || t.id > TYPE_ID_MAX) throw refuse('bad type id');
     if (t.id > maxId) maxId = t.id;
   }
   s.count = n;
@@ -270,7 +285,7 @@ function buildSchema(raw: RawType[], rootId: number): Schema {
     let len = 0;
     let j = i;
     while (j >= 0 && full[j] === null) {
-      if (len === n) throw new Error('type inheritance loop');
+      if (len === n) throw refuse('type inheritance loop');
       chain[len++] = j;
       j = parent[j];
     }
@@ -278,7 +293,7 @@ function buildSchema(raw: RawType[], rootId: number): Schema {
       const k = chain[--len];
       const pk = parent[k];
       const list = pk >= 0 ? (full[pk] as RawField[]).concat(raw[k].fields) : raw[k].fields;
-      if (list.length > FIELDS_MAX) throw new Error('too many fields in a type');
+      if (list.length > FIELDS_MAX) throw refuse('too many fields in a type');
       full[k] = list;
       base[k] = pk >= 0 ? base[pk] : k;
     }
@@ -307,10 +322,10 @@ function buildSchema(raw: RawType[], rootId: number): Schema {
       if (f.type === 'quantized') {
         s.fVal[at] = VAL_PRIM;
         const prim = QUANTIZED_PRIM[f.bits === UNSET ? QUANTIZED_DEFAULT_BITS : f.bits];
-        if (prim === undefined) throw new Error('bad quantized width');
+        if (prim === undefined) throw refuse('bad quantized width');
         s.fPrim[at] = prim;
       } else if (f.type === 'ref') {
-        if (typeIndex < 0) throw new Error('ref field without a type');
+        if (typeIndex < 0) throw refuse('ref field without a type');
         s.fVal[at] = VAL_REF;
         s.fType[at] = typeIndex;
       } else if (own.call(COLLECTION_KINDS, head)) {
@@ -325,7 +340,7 @@ function buildSchema(raw: RawType[], rootId: number): Schema {
         } else if (f.childPrimitive !== null) {
           s.fChildVal[at] = VAL_PRIM;
           s.fPrim[at] = primId(f.childPrimitive);
-        } else throw new Error('collection field without an item type');
+        } else throw refuse('collection field without an item type');
       } else {
         s.fVal[at] = VAL_PRIM;
         s.fPrim[at] = primId(f.type);
@@ -334,7 +349,7 @@ function buildSchema(raw: RawType[], rootId: number): Schema {
     }
   }
   const root = rootId >= 0 && rootId <= maxId ? s.indexOfId[rootId] : -1;
-  if (root < 0) throw new Error('root type missing');
+  if (root < 0) throw refuse('root type missing');
   s.root = root;
   return s;
 }
@@ -344,14 +359,6 @@ interface Node { type: number; field: number; nums: number[]; strs: (string | nu
 
 function newNode(type: number, field: number): Node {
   return { type, field, nums: [], strs: [], kids: [] };
-}
-
-/** An integer `number` at p: any integer spelling, never a float, magnitude below 2^53. Sets cursor.end. */
-function readInt(b: Uint8Array, p: number, end: number): number {
-  if (p < end && (b[p] === 0xca || b[p] === 0xcb)) throw new Error('reflection: float where an integer belongs');
-  const v = readNumber(b, p, end);
-  if (!(v > -INT_EXACT_MAX && v < INT_EXACT_MAX)) throw new Error('reflection: integer out of range');
-  return v;
 }
 
 /**
@@ -380,7 +387,7 @@ export function parseReflection(b: Uint8Array, offset: number, end: number): Sch
   const refId = (): number => {
     const id = readInt(b, p, end);
     p = cursor.end;
-    if (id < 0 || id >= REFLECTION_REF_MAX) throw new Error('reflection: bad refId');
+    if (id < 0 || id >= REFLECTION_REF_MAX) throw refuse('reflection: bad refId');
     return id;
   };
   const value = (op: number, fi: number, item: boolean, index: number): void => {
@@ -396,7 +403,7 @@ export function parseReflection(b: Uint8Array, offset: number, end: number): Sch
       if (child === undefined) {
         child = newNode(boot.fType[fi], -1);
         refs.set(id, child);
-      } else if (child.type !== boot.fType[fi]) throw new Error('reflection: refId used for two types');
+      } else if (child.type !== boot.fType[fi]) throw refuse('reflection: refId used for two types');
       cur.kids[index] = child;
     } else if (val === VAL_COLL) {
       const coll = newNode(-1, fi);
@@ -413,7 +420,7 @@ export function parseReflection(b: Uint8Array, offset: number, end: number): Sch
         p = cursor.end;
       } else {
         const w = PRIM_WIDTH[prim];
-        if (p + w > end) throw new Error('reflection: primitive past the end');
+        if (p + w > end) throw refuse('reflection: primitive past the end');
         cur.nums[index] = w === 1 ? b[p] : 0; // only the one-byte fields (bits, mode) are read; min and max are skipped
         p += w;
       }
@@ -423,20 +430,20 @@ export function parseReflection(b: Uint8Array, offset: number, end: number): Sch
     const head = b[p++];
     if (head === SWITCH_TO_STRUCTURE) {
       const next = refs.get(refId());
-      if (next === undefined) throw new Error('reflection: unknown refId');
+      if (next === undefined) throw refuse('reflection: unknown refId');
       cur = next;
       continue;
     }
     if (cur.type >= 0) {
       const index = head & FIELD_INDEX_MASK;
-      if (index >= boot.fieldCount[cur.type]) throw new Error('reflection: unknown field');
+      if (index >= boot.fieldCount[cur.type]) throw refuse('reflection: unknown field');
       value(head & OP_MASK, boot.fieldStart[cur.type] + index, false, index);
     } else {
       if (head === OP_CLEAR || head === OP_REVERSE) continue;
       const index = readInt(b, p, end);
       p = cursor.end;
       if (head === OP_DELETE_BY_REFID) continue;
-      if (index < 0 || index > TYPE_ID_MAX) throw new Error('reflection: bad index');
+      if (index < 0 || index > TYPE_ID_MAX) throw refuse('reflection: bad index');
       value(head, cur.field, true, index);
     }
   }
@@ -468,7 +475,7 @@ export function parseReflection(b: Uint8Array, offset: number, end: number): Sch
       rawTypes.push({ id: num(t, 0), extendsId: num(t, 1), fields });
     }
   }
-  if (rawTypes.length === 0) throw new Error('reflection: no types');
+  if (rawTypes.length === 0) throw refuse('reflection: no types');
   const rootId = num(root, 1);
   return buildSchema(rawTypes, rootId === UNSET ? 0 : rootId);
 }

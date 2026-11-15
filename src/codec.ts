@@ -58,6 +58,7 @@ import {
   BACKOFF_MIN_COUNT,
 } from './symbols.ts';
 import { PairMap, Rows, ABSENT } from './intmap.ts';
+import { withRoom } from './arrays.ts';
 import { StringModel, HINT_MAX } from './strings.ts';
 import { detSin, detCos } from './trig.ts';
 import { SITE, OWNER, CONTEXTS_UNCHECKED } from './prior.ts';
@@ -78,6 +79,10 @@ export const ROLE_NAMES: string[] = MEASURE ? Object.keys(ROLE).slice(0, ROLE.CO
  * Speed tricks that can be switched off one at a time to measure what each costs in size.
  * 1 = on. Both directions must use the same settings, and they are part of the packed format: a file packed with
  * other settings does not unpack with these. A port to another language implements the shipped settings only.
+ *
+ * So does a packaged build: there these are constants, and the code, the tables and the bookkeeping that only
+ * another setting would use are folded away. Every test of a setting is therefore written so that it can fold:
+ * the setting first in a condition, and the state only one setting needs touched under that same condition.
  */
 export const TUNING = {
   /** Next structure: one bit "the one that followed this pair last time" before the full class symbol. Off also means SwitchChain off. */
@@ -400,6 +405,7 @@ const FLOAT_MIN_ULP = 1e-12;
 const TWO_PI = 6.283185307179586;
 const SIGN_BIT = 0x80000000;
 const TWO_POW_32 = 4294967296;
+const U32_BYTES = 4;
 const LAST_EXACT_NEVER = -1000000;
 
 // ---- messages
@@ -412,6 +418,43 @@ const MSG_NUM_POS = 8;
 const NUM_TYPE_BASE = 1 << 20;
 const NUM_TYPE_SLOTS = 256;
 const ENC_BITS = 2;
+
+// What follows a msgpack marker from MP_FIRST (0xc4) to 0xdf: a kind and a count, packed as kind * 32 + count.
+/** A number: `count` payload bytes. */
+const MP_NUM = 0;
+/** A string whose length is written in `count` bytes. */
+const MP_STR = 1;
+/** Plain bytes whose length is written in `count` bytes. */
+const MP_BIN = 2;
+/** An extension: its length in `count` bytes, then one type byte and that many bytes. */
+const MP_EXT = 3;
+/** An extension of fixed size: `count` bytes after the marker, type byte included. */
+const MP_FIXEXT = 4;
+/** An array whose item count is written in `count` bytes. */
+const MP_ARRAY = 5;
+/** A map whose pair count is written in `count` bytes. */
+const MP_MAP = 6;
+/** A string with a four byte length (0xdb): longer than the walker models. */
+const MP_UNMODELED = 7;
+const MP_FIRST = 0xc4;
+const MP_KIND_SHIFT = 5;
+const MP_COUNT_MASK = 31;
+const MP_TABLE = [
+  // 0xc4 bin 8, 16, 32; 0xc7 ext 8, 16, 32
+  (MP_BIN << MP_KIND_SHIFT) | 1, (MP_BIN << MP_KIND_SHIFT) | 2, (MP_BIN << MP_KIND_SHIFT) | 4,
+  (MP_EXT << MP_KIND_SHIFT) | 1, (MP_EXT << MP_KIND_SHIFT) | 2, (MP_EXT << MP_KIND_SHIFT) | 4,
+  // 0xca float 32, 64; 0xcc uint 8, 16, 32, 64; 0xd0 int 8, 16, 32, 64
+  (MP_NUM << MP_KIND_SHIFT) | 4, (MP_NUM << MP_KIND_SHIFT) | 8,
+  (MP_NUM << MP_KIND_SHIFT) | 1, (MP_NUM << MP_KIND_SHIFT) | 2, (MP_NUM << MP_KIND_SHIFT) | 4, (MP_NUM << MP_KIND_SHIFT) | 8,
+  (MP_NUM << MP_KIND_SHIFT) | 1, (MP_NUM << MP_KIND_SHIFT) | 2, (MP_NUM << MP_KIND_SHIFT) | 4, (MP_NUM << MP_KIND_SHIFT) | 8,
+  // 0xd4 fixext 1, 2, 4, 8, 16 (one type byte more each)
+  (MP_FIXEXT << MP_KIND_SHIFT) | 2, (MP_FIXEXT << MP_KIND_SHIFT) | 3, (MP_FIXEXT << MP_KIND_SHIFT) | 5,
+  (MP_FIXEXT << MP_KIND_SHIFT) | 9, (MP_FIXEXT << MP_KIND_SHIFT) | 17,
+  // 0xd9 str 8, 16, 32
+  (MP_STR << MP_KIND_SHIFT) | 1, (MP_STR << MP_KIND_SHIFT) | 2, MP_UNMODELED << MP_KIND_SHIFT,
+  // 0xdc array 16, 32; 0xde map 16, 32
+  (MP_ARRAY << MP_KIND_SHIFT) | 2, (MP_ARRAY << MP_KIND_SHIFT) | 4, (MP_MAP << MP_KIND_SHIFT) | 2, (MP_MAP << MP_KIND_SHIFT) | 4,
+];
 
 const CORRUPT = 'packed data is damaged';
 const INTERNAL = 'walker and validator disagree';
@@ -442,22 +485,13 @@ function dtBucket(d: number): number {
   return 12;
 }
 
-/** A collection operation byte (or 255 switch, 256 end) as a small code 1..11; 0 is "start of the visit". */
-function opCode(sym: number): number {
-  switch (sym) {
-    case 0: return 1;
-    case 64: return 2;
-    case 128: return 3;
-    case 192: return 4;
-    case 10: return 5;
-    case 15: return 6;
-    case 33: return 7;
-    case 129: return 8;
-    case 255: return 9;
-    case 256: return 10;
-    default: return 11;
-  }
-}
+/**
+ * A collection operation byte (or 255 switch, 256 end) as a small code 1..11; 0 is "start of the visit". The ten
+ * symbols listed get codes 1 to 10 in this order, every other symbol shares the last code.
+ */
+const OP_CODE_SYMBOLS = [0, 64, 128, 192, 10, 15, 33, 129, 255, 256];
+const OP_CODE = new Uint8Array(HEAD_SYMBOLS).fill(OP_CODES - 1);
+for (let i = 0; i < OP_CODE_SYMBOLS.length; i++) OP_CODE[OP_CODE_SYMBOLS[i]] = i + 1;
 
 /** float32 bit pattern -> an integer that grows with the float's value (so nearby floats are nearby integers). */
 function monotone(bits: number): number {
@@ -465,22 +499,6 @@ function monotone(bits: number): number {
 }
 function unmonotone(m: number): number {
   return m >= 0 ? m : -(m + 1) + SIGN_BIT;
-}
-
-function growI32(a: Int32Array, cap: number) {
-  const n = new Int32Array(cap);
-  n.set(a);
-  return n;
-}
-function growU8(a: Uint8Array, cap: number) {
-  const n = new Uint8Array(cap);
-  n.set(a);
-  return n;
-}
-function growF64(a: Float64Array, cap: number) {
-  const n = new Float64Array(cap);
-  n.set(a);
-  return n;
 }
 
 export interface CodecOptions {
@@ -618,8 +636,9 @@ export class Codec {
   private hOrderLen = new Int32Array(this.hCap);
   private hOrderCap = new Int32Array(this.hCap);
   private hInOrder = new Uint8Array(this.hCap);
-  private hOrd = new Int32Array(this.hCap);
-  private hLastKid = new Int32Array(this.hCap);
+  // the next two are kept when TUNING.TreeOrdinal is on
+  private declare hOrd: Int32Array;
+  private declare hLastKid: Int32Array;
   private hTpl = new Int32Array(this.hCap);
   private hTplCount = new Int32Array(this.hCap);
   private hFh = new Int32Array(this.hCap);
@@ -664,14 +683,16 @@ export class Codec {
   private visitPrev = 0;
   // collections
   private readonly collCtx = new Int32Array(CID_SPACE * OP_CODES);
-  private readonly collSucc = new Uint16Array(CID_SPACE * OP_CODES);
+  /** What followed each operation last time, plus one. Kept when TUNING.CollFlag is on. */
+  private declare readonly collSucc: Uint16Array;
   private readonly idxCtx = new Int32Array(CID_SPACE);
   private readonly keyField = new Int32Array(CID_SPACE);
   // switches
   private readonly swBlock = new Int32Array(CG_SPACE);
   private readonly treeBlock = new Int32Array(CG_SPACE);
   private readonly swPairs = new PairMap(CONFIG.PairsStart);
-  private readonly swUpLast = new Uint8Array(CG_SPACE * SW_CLASSES);
+  /** The "levels up" of the last tree walk from each situation, plus one. Kept when TUNING.TreeFlag is on. */
+  private declare readonly swUpLast: Uint8Array;
   private readonly twRows = new Rows(CG_SPACE, TREE_KEYS);
   private swPrev = START;
   private readonly chain = new Int32Array(TREE_MAX_DEPTH + 2);
@@ -811,6 +832,12 @@ export class Codec {
     this.cStepExact = rc.alloc(2 * GAMMA_W);
     this.cMsgNum = rc.alloc(GAMMA_W);
     this.msgTypes = this.strings.newField();
+    if (TUNING.TreeOrdinal !== 0) {
+      this.hOrd = new Int32Array(this.hCap);
+      this.hLastKid = new Int32Array(this.hCap);
+    }
+    if (TUNING.CollFlag !== 0) this.collSucc = new Uint16Array(CID_SPACE * OP_CODES);
+    if (TUNING.TreeFlag !== 0) this.swUpLast = new Uint8Array(CG_SPACE * SW_CLASSES);
     if (PRIOR) {
       const prior = opts.prior === undefined ? null : opts.prior;
       this.knownHandshake = prior !== null ? prior.handshake : EMPTY;
@@ -1017,11 +1044,7 @@ export class Codec {
    */
   private room(n: number): void {
     if (this.op + this.p + n > this.limit) throw new Error(CORRUPT);
-    if (this.p + n + TOKEN_MARGIN > this.b.length) {
-      let cap = this.b.length * 2;
-      while (cap < this.p + n + TOKEN_MARGIN) cap *= 2;
-      this.b = growU8(this.b, cap);
-    }
+    if (this.p + n + TOKEN_MARGIN > this.b.length) this.b = withRoom(this.b, this.p + n + TOKEN_MARGIN);
   }
 
   private emit(bytes: Uint8Array, start: number, end: number): void {
@@ -1131,32 +1154,29 @@ export class Codec {
     }
   }
 
-  /** Decode only: the canonical Colyseus encoding of an integer, written at the frame cursor. */
+  /**
+   * Decode only: the canonical Colyseus encoding of an integer, written at the frame cursor: one byte for -32 to
+   * 127, else a prefix (0xcc to 0xcf unsigned, 0xd0 to 0xd3 signed, for 1, 2, 4 and 8 bytes) and the value in
+   * little-endian two's complement, in the smallest size that holds it.
+   */
   private writeInt(v: number): void {
     const b = this.b;
     let p = this.p;
-    if (v >= 0) {
-      if (v < 0x80) b[p++] = v;
-      else if (v < 0x100) { b[p++] = 0xcc; b[p++] = v; }
-      else if (v < 0x10000) { b[p++] = 0xcd; b[p++] = v & 0xff; b[p++] = v >>> 8; }
-      else if (v < TWO_POW_32) { b[p++] = 0xce; b[p++] = v & 0xff; b[p++] = (v >>> 8) & 0xff; b[p++] = (v >>> 16) & 0xff; b[p++] = v >>> 24; }
-      else {
-        b[p++] = 0xcf;
-        const lo = v % TWO_POW_32;
-        const hi = Math.floor(v / TWO_POW_32);
-        b[p++] = lo & 0xff; b[p++] = (lo >>> 8) & 0xff; b[p++] = (lo >>> 16) & 0xff; b[p++] = lo >>> 24;
-        b[p++] = hi & 0xff; b[p++] = (hi >>> 8) & 0xff; b[p++] = (hi >>> 16) & 0xff; b[p++] = hi >>> 24;
-      }
-    } else if (v >= -0x20) b[p++] = 0xe0 | (v + 0x20);
-    else if (v >= -0x80) { b[p++] = 0xd0; b[p++] = v & 0xff; }
-    else if (v >= -0x8000) { b[p++] = 0xd1; b[p++] = v & 0xff; b[p++] = (v >> 8) & 0xff; }
-    else if (v >= -2147483648) { b[p++] = 0xd2; b[p++] = v & 0xff; b[p++] = (v >> 8) & 0xff; b[p++] = (v >> 16) & 0xff; b[p++] = (v >> 24) & 0xff; }
+    if (v >= 0 && v < 0x80) b[p++] = v;
+    else if (v < 0 && v >= -0x20) b[p++] = 0xe0 | (v + 0x20);
     else {
-      b[p++] = 0xd3;
+      // size: 0, 1, 2, 3 for 1, 2, 4, 8 bytes
+      let size: number;
+      if (v >= 0) size = v < 0x100 ? 0 : v < 0x10000 ? 1 : v < TWO_POW_32 ? 2 : 3;
+      else size = v >= -0x80 ? 0 : v >= -0x8000 ? 1 : v >= -2147483648 ? 2 : 3;
+      b[p++] = (v >= 0 ? 0xcc : 0xd0) + size;
+      // the low 32 bits, then the high 32 bits; `>>>` reads either as its two's complement pattern
       const hi = Math.floor(v / TWO_POW_32);
-      const lo = v - hi * TWO_POW_32;
-      b[p++] = lo & 0xff; b[p++] = (lo >>> 8) & 0xff; b[p++] = (lo >>> 16) & 0xff; b[p++] = lo >>> 24;
-      b[p++] = hi & 0xff; b[p++] = (hi >> 8) & 0xff; b[p++] = (hi >> 16) & 0xff; b[p++] = (hi >> 24) & 0xff;
+      let word = v - hi * TWO_POW_32;
+      for (let k = 0; k < 1 << size; k++) {
+        if (k === U32_BYTES) word = hi;
+        b[p++] = (word >>> ((k % U32_BYTES) * BYTE_BITS)) & 0xff;
+      }
     }
     this.p = p;
   }
@@ -1227,39 +1247,41 @@ export class Codec {
   private growHandles(): void {
     const cap = this.hCap * 2;
     this.hCap = cap;
-    this.hKind = growU8(this.hKind, cap);
-    this.hRef = growI32(this.hRef, cap);
-    this.hType = growI32(this.hType, cap);
-    this.hCg = growI32(this.hCg, cap);
-    this.hFid = growI32(this.hFid, cap);
-    this.hSlot = growI32(this.hSlot, cap);
-    this.hSlotCap = growI32(this.hSlotCap, cap);
-    this.hSucc = growI32(this.hSucc, cap);
-    this.hNextIdx = growI32(this.hNextIdx, cap);
-    this.hLastItem = growI32(this.hLastItem, cap);
-    this.hSwLast = growU8(this.hSwLast, cap);
-    this.hSkips = growU8(this.hSkips, cap);
-    this.hInList = growU8(this.hInList, cap);
-    this.hLn = growI32(this.hLn, cap);
-    this.hLp = growI32(this.hLp, cap);
-    this.hRecent = growI32(this.hRecent, cap * SW_RECENT_MAX);
-    this.hRecentN = growU8(this.hRecentN, cap);
-    this.hParent = growI32(this.hParent, cap);
-    this.hPidx = growI32(this.hPidx, cap);
-    this.hList = growI32(this.hList, cap);
-    this.hOrderLen = growI32(this.hOrderLen, cap);
-    this.hOrderCap = growI32(this.hOrderCap, cap);
-    this.hInOrder = growU8(this.hInOrder, cap);
-    this.hOrd = growI32(this.hOrd, cap);
-    this.hLastKid = growI32(this.hLastKid, cap);
-    this.hTpl = growI32(this.hTpl, cap);
-    this.hTplCount = growI32(this.hTplCount, cap);
-    this.hFh = growI32(this.hFh, cap);
-    this.hCar = growI32(this.hCar, cap);
-    this.hCarIndex = growI32(this.hCarIndex, cap);
-    this.hPortal = growI32(this.hPortal, cap);
-    this.hSymIndex = growI32(this.hSymIndex, cap);
-    this.hSymCount = growI32(this.hSymCount, cap);
+    this.hKind = withRoom(this.hKind, cap);
+    this.hRef = withRoom(this.hRef, cap);
+    this.hType = withRoom(this.hType, cap);
+    this.hCg = withRoom(this.hCg, cap);
+    this.hFid = withRoom(this.hFid, cap);
+    this.hSlot = withRoom(this.hSlot, cap);
+    this.hSlotCap = withRoom(this.hSlotCap, cap);
+    this.hSucc = withRoom(this.hSucc, cap);
+    this.hNextIdx = withRoom(this.hNextIdx, cap);
+    this.hLastItem = withRoom(this.hLastItem, cap);
+    this.hSwLast = withRoom(this.hSwLast, cap);
+    this.hSkips = withRoom(this.hSkips, cap);
+    this.hInList = withRoom(this.hInList, cap);
+    this.hLn = withRoom(this.hLn, cap);
+    this.hLp = withRoom(this.hLp, cap);
+    this.hRecent = withRoom(this.hRecent, cap * SW_RECENT_MAX);
+    this.hRecentN = withRoom(this.hRecentN, cap);
+    this.hParent = withRoom(this.hParent, cap);
+    this.hPidx = withRoom(this.hPidx, cap);
+    this.hList = withRoom(this.hList, cap);
+    this.hOrderLen = withRoom(this.hOrderLen, cap);
+    this.hOrderCap = withRoom(this.hOrderCap, cap);
+    this.hInOrder = withRoom(this.hInOrder, cap);
+    if (TUNING.TreeOrdinal !== 0) {
+      this.hOrd = withRoom(this.hOrd, cap);
+      this.hLastKid = withRoom(this.hLastKid, cap);
+    }
+    this.hTpl = withRoom(this.hTpl, cap);
+    this.hTplCount = withRoom(this.hTplCount, cap);
+    this.hFh = withRoom(this.hFh, cap);
+    this.hCar = withRoom(this.hCar, cap);
+    this.hCarIndex = withRoom(this.hCarIndex, cap);
+    this.hPortal = withRoom(this.hPortal, cap);
+    this.hSymIndex = withRoom(this.hSymIndex, cap);
+    this.hSymCount = withRoom(this.hSymCount, cap);
   }
 
   private newHandle(id: number, kind: number, type: number, cg: number, fid: number): number {
@@ -1287,8 +1309,10 @@ export class Codec {
     this.hOrderLen[h] = 0;
     this.hOrderCap[h] = 0;
     this.hInOrder[h] = 0;
-    this.hOrd[h] = 0;
-    this.hLastKid[h] = 0;
+    if (TUNING.TreeOrdinal !== 0) {
+      this.hOrd[h] = 0;
+      this.hLastKid[h] = 0;
+    }
     this.hTpl[h] = -1;
     this.hTplCount[h] = TPL_NONE;
     this.hFh[h] = -1;
@@ -1308,11 +1332,11 @@ export class Codec {
     const h = new Int32Array(cap).fill(-1);
     h.set(this.handleOf);
     this.handleOf = h;
-    this.pendFlag = growU8(this.pendFlag, cap);
+    this.pendFlag = withRoom(this.pendFlag, cap);
     if (ENCODE) {
-      this.ovStamp = growI32(this.ovStamp, cap);
-      this.ovKind = growU8(this.ovKind, cap);
-      this.ovType = growI32(this.ovType, cap);
+      this.ovStamp = withRoom(this.ovStamp, cap);
+      this.ovKind = withRoom(this.ovKind, cap);
+      this.ovType = withRoom(this.ovType, cap);
     }
     this.refCap = cap;
   }
@@ -1322,11 +1346,9 @@ export class Codec {
     const base = this.slotUsed;
     this.slotUsed += n;
     if (this.slotUsed > this.sv.length) {
-      let cap = this.sv.length * 2;
-      while (cap < this.slotUsed) cap *= 2;
-      this.sv = growF64(this.sv, cap);
-      this.saux = growI32(this.saux, cap);
-      this.sinit = growF64(this.sinit, cap);
+      this.sv = withRoom(this.sv, this.slotUsed);
+      this.saux = withRoom(this.saux, this.slotUsed);
+      this.sinit = withRoom(this.sinit, this.slotUsed);
     }
     this.sv.fill(0, base, base + n);
     this.saux.fill(0, base, base + n);
@@ -1338,11 +1360,7 @@ export class Codec {
   private iaAlloc(n: number): number {
     const base = this.iaUsed;
     this.iaUsed += n;
-    if (this.iaUsed > this.ia.length) {
-      let cap = this.ia.length * 2;
-      while (cap < this.iaUsed) cap *= 2;
-      this.ia = growI32(this.ia, cap);
-    }
+    if (this.iaUsed > this.ia.length) this.ia = withRoom(this.ia, this.iaUsed);
     this.ia.fill(0, base, base + n);
     return base;
   }
@@ -1350,13 +1368,7 @@ export class Codec {
   private succAlloc(n: number): number {
     const base = this.succUsed;
     this.succUsed += n;
-    if (this.succUsed > this.succ.length) {
-      let cap = this.succ.length * 2;
-      while (cap < this.succUsed) cap *= 2;
-      const s = new Uint16Array(cap);
-      s.set(this.succ);
-      this.succ = s;
-    }
+    if (this.succUsed > this.succ.length) this.succ = withRoom(this.succ, this.succUsed);
     this.succ.fill(0, base, base + n);
     return base;
   }
@@ -1388,20 +1400,19 @@ export class Codec {
     base = this.fhUsed;
     this.fhUsed += n;
     if (this.fhUsed > this.fcnt.length) {
-      let cap = this.fcnt.length * 2;
-      while (cap < this.fhUsed) cap *= 2;
-      this.fx1 = growF64(this.fx1, cap);
-      this.fx2 = growF64(this.fx2, cap);
-      this.fx3 = growF64(this.fx3, cap);
-      this.fx4 = growF64(this.fx4, cap);
-      this.ff0 = growI32(this.ff0, cap);
-      this.ff1 = growI32(this.ff1, cap);
-      this.ff2 = growI32(this.ff2, cap);
-      this.ff3 = growI32(this.ff3, cap);
-      this.ff4 = growI32(this.ff4, cap);
-      this.fcnt = growU8(this.fcnt, cap);
-      this.fscored = growI32(this.fscored, cap);
-      this.fscore = growI32(this.fscore, cap * FLOAT_ORDERS);
+      const cap = this.fhUsed;
+      this.fx1 = withRoom(this.fx1, cap);
+      this.fx2 = withRoom(this.fx2, cap);
+      this.fx3 = withRoom(this.fx3, cap);
+      this.fx4 = withRoom(this.fx4, cap);
+      this.ff0 = withRoom(this.ff0, cap);
+      this.ff1 = withRoom(this.ff1, cap);
+      this.ff2 = withRoom(this.ff2, cap);
+      this.ff3 = withRoom(this.ff3, cap);
+      this.ff4 = withRoom(this.ff4, cap);
+      this.fcnt = withRoom(this.fcnt, cap);
+      this.fscored = withRoom(this.fscored, cap);
+      this.fscore = withRoom(this.fscore, cap * FLOAT_ORDERS);
     }
     for (let i = base; i < base + n; i++) {
       this.fx1[i] = 0;
@@ -1493,11 +1504,7 @@ export class Codec {
       let g: number;
       if (!game) g = baseId < BOOT_GROUPS ? baseId : BOOT_GROUPS - 1;
       else {
-        if (baseId >= this.gameGroup.length) {
-          let cap = this.gameGroup.length * 2;
-          while (cap <= baseId) cap *= 2;
-          this.gameGroup = growI32(this.gameGroup, cap);
-        }
+        if (baseId >= this.gameGroup.length) this.gameGroup = withRoom(this.gameGroup, baseId + 1);
         g = this.gameGroup[baseId];
         if (g === 0) {
           g = (this.groupsUsed < GROUP_MAX ? this.groupsUsed++ : GROUP_MAX - 1) + 1;
@@ -1570,7 +1577,7 @@ export class Codec {
   }
 
   private pendingPush(id: number): void {
-    if (this.pendingLen === this.pending.length) this.pending = growI32(this.pending, this.pending.length * 2);
+    if (this.pendingLen === this.pending.length) this.pending = withRoom(this.pending, this.pendingLen + 1);
     this.pending[this.pendingLen++] = id;
     this.pendFlag[id] = 1;
   }
@@ -1604,7 +1611,7 @@ export class Codec {
       this.ia[this.hList[parent] + len] = child;
       this.hOrderLen[parent] = len + 1;
       this.hInOrder[child] = 1;
-      this.hOrd[child] = len;
+      if (TUNING.TreeOrdinal !== 0) this.hOrd[child] = len;
     }
   }
 
@@ -1727,10 +1734,9 @@ export class Codec {
    */
   private floatToken(h: number, index: number, at: number): void {
     if (this.ftN === this.ftH.length) {
-      const cap = this.ftN * 2;
-      this.ftH = growI32(this.ftH, cap);
-      this.ftI = growI32(this.ftI, cap);
-      this.ftV = growF64(this.ftV, cap);
+      this.ftH = withRoom(this.ftH, this.ftN + 1);
+      this.ftI = withRoom(this.ftI, this.ftN + 1);
+      this.ftV = withRoom(this.ftV, this.ftN + 1);
     }
     this.ftH[this.ftN] = h;
     this.ftI[this.ftN] = index;
@@ -1921,16 +1927,16 @@ export class Codec {
         if (MEASURE) rc.role = ROLE.CHEAD;
         const k = this.hFid[cur] * OP_CODES + pcode;
         const base = this.ctx(this.collCtx, k, COLL_BLOCK);
-        const pred = this.collSucc[k];
+        const pred = TUNING.CollFlag !== 0 ? this.collSucc[k] : 0;
         let hit = 0;
-        if (TUNING.CollFlag !== 0 && pred !== 0) hit = rc.bit(base + opCode(pred - 1), actual + 1 === pred ? 1 : 0);
+        if (TUNING.CollFlag !== 0 && pred !== 0) hit = rc.bit(base + OP_CODE[pred - 1], actual + 1 === pred ? 1 : 0);
         if (hit !== 0) sym = pred - 1;
         else {
           sym = tree(rc, base + COLL_TREE_OFF, HEAD_BITS, actual);
           if (sym > HEAD_END) throw new Error(CORRUPT);
         }
-        this.collSucc[k] = sym + 1;
-        pcode = opCode(sym);
+        if (TUNING.CollFlag !== 0) this.collSucc[k] = sym + 1;
+        pcode = OP_CODE[sym];
       }
       if (sym === HEAD_END) return;
       if (enc) this.p++;
@@ -2250,10 +2256,10 @@ export class Codec {
       }
     }
     const curLast = this.hSwLast[cur];
-    const upGuess = this.swUpLast[g * SW_CLASSES + curLast];
+    const upGuess = TUNING.TreeFlag !== 0 ? this.swUpLast[g * SW_CLASSES + curLast] : 0;
     if (TUNING.TreeFlag !== 0 && upGuess !== 0 && rc.bit(blk + SW_UPFLAG_OFF + curLast, up + 1 === upGuess ? 1 : 0) !== 0) up = upGuess - 1;
     else up = tree(rc, blk + SW_UP_OFF + curLast * 8, TREE_UP_BITS, up);
-    this.swUpLast[g * SW_CLASSES + curLast] = up + 1;
+    if (TUNING.TreeFlag !== 0) this.swUpLast[g * SW_CLASSES + curLast] = up + 1;
     if (up === TREE_FALLBACK) return -1;
     let n = cur;
     for (let u = 0; u < up; u++) {
@@ -2278,20 +2284,21 @@ export class Codec {
         tc = rc.alloc(nStruct ? 1 << TREE_KID_BITS : INT_BLOCK);
         rows.ctx[e] = tc;
       }
-      const guess = rows.aux[e];
-      const ordinal = !nStruct && TUNING.TreeOrdinal !== 0;
+      const guess = TUNING.TreeFlag !== 0 ? rows.aux[e] : 0;
+      // (the TreeOrdinal tests below are spelled out, not kept in a variable: a constant declared inside a loop is
+      // not folded by the minifier)
       let step1 = 0;
-      if (enc) step1 = nStruct ? this.hPidx[want] : ordinal ? zigzag(this.hOrd[want] - this.hLastKid[n]) : this.orderIndex(n, want);
+      if (enc) step1 = nStruct ? this.hPidx[want] : TUNING.TreeOrdinal !== 0 ? zigzag(this.hOrd[want] - this.hLastKid[n]) : this.orderIndex(n, want);
       if (TUNING.TreeFlag !== 0 && guess !== 0 && rc.bit(tc, step1 + 1 === guess ? 1 : 0) !== 0) step1 = guess - 1;
       else step1 = nStruct ? tree(rc, tc, TREE_KID_BITS, step1) : gamma1(rc, tc + 1, GAMMA_BITS_NARROW, step1);
-      rows.aux[e] = step1 + 1;
+      if (TUNING.TreeFlag !== 0) rows.aux[e] = step1 + 1;
       if (nStruct) {
         if (enc) n = want;
         else {
           const kb = this.hList[n];
           n = kb >= 0 && step1 < (this.schema as Schema).fieldCount[this.hType[n]] ? this.ia[kb + step1] - 1 : -1;
         }
-      } else if (ordinal) {
+      } else if (TUNING.TreeOrdinal !== 0) {
         const ord = this.hLastKid[n] + unzigzag(step1);
         this.hLastKid[n] = ord;
         n = ord >= 0 && ord < this.hOrderLen[n] ? this.ia[this.hList[n] + ord] : -1;
@@ -2416,8 +2423,8 @@ export class Codec {
     }
     la = this.laN++;
     if (la >= this.laRef.length) {
-      this.laRef = growI32(this.laRef, la * 2);
-      this.laCount = growI32(this.laCount, la * 2);
+      this.laRef = withRoom(this.laRef, la + 1);
+      this.laCount = withRoom(this.laCount, la + 1);
     }
     this.laRef[la] = ref;
     this.laCount[la] = 1;
@@ -2430,11 +2437,7 @@ export class Codec {
     const id = this.lastStr;
     if (this.tCar[ti] !== 0) {
       if (index !== this.tCarId[ti]) return;
-      if (id >= this.portalOf.length) {
-        let cap = this.portalOf.length * 2;
-        while (cap <= id) cap *= 2;
-        this.portalOf = growI32(this.portalOf, cap);
-      }
+      if (id >= this.portalOf.length) this.portalOf = withRoom(this.portalOf, id + 1);
       this.portalOf[id] = ref + 1;
     } else if (ti === this.syType && index === this.syPortal && this.hPortal[ref] < 0) {
       const portal = id < this.portalOf.length ? this.portalOf[id] - 1 : -1;
@@ -2494,7 +2497,7 @@ export class Codec {
           rows.ctx[e] = lo;
         }
         const hi = TUNING.ByteVisit !== 0 ? this.sparse(this.byteHi, e, this.visitPrev, BYTE_BLOCK) : lo;
-        const guess = rows.aux[e]; // the change that followed `last` here last time, plus one (used by ByteFlag)
+        const guess = TUNING.ByteFlag !== 0 ? rows.aux[e] : 0; // the change that followed `last` here last time, plus one
         let d = 0;
         let v = 0;
         if (enc) {
@@ -2507,7 +2510,7 @@ export class Codec {
           v = (prev + d) & 0xff;
           this.b[this.p++] = v;
         }
-        rows.aux[e] = d + 1;
+        if (TUNING.ByteFlag !== 0) rows.aux[e] = d + 1;
         this.sv[slot] = v;
         if (fresh) this.sinit[slot] = v;
         this.saux[slot] = (d + 1) | AUX_WRITTEN;
@@ -2628,7 +2631,7 @@ export class Codec {
    */
   private beginStateFrame(hasRatio: number, qRatio: number, hasExact: number, qExact: number): void {
     this.frameNo++;
-    if (this.frameNo >= this.ft.length) this.ft = growF64(this.ft, this.ft.length * 2);
+    if (this.frameNo >= this.ft.length) this.ft = withRoom(this.ft, this.frameNo + 1);
     this.hasRatio = hasRatio;
     this.hasExact = hasExact;
     if (ENCODE) this.stats.steps[hasRatio + 2 * hasExact]++;
@@ -2725,6 +2728,10 @@ export class Codec {
    * Score each order by how well it would have predicted the slot's newest value from the ones before it, now that
    * the frame times around it are final. Done once per new value, so the encoder's look-ahead and the real pass
    * leave the scores in the same state.
+   *
+   * Only the ScoreNow-off setting calls this. A packaged build is made with ScoreNow on and leaves the method out;
+   * the build stops if that setting is ever changed without this tag.
+   * @build measure
    */
   private scoreSlot(slot: number, fh: number): void {
     const n = this.fcnt[fh];
@@ -3127,53 +3134,29 @@ export class Codec {
     if (p >= end || depth > MSG_DEPTH_MAX) return -1;
     const m = b[p++];
     if (m < 0x80 || m >= 0xe0 || m === 0xc0 || m === 0xc2 || m === 0xc3) return p;
-    let n: number;
     let items = -1;
     if (m < 0x90) items = 2 * (m & 0x0f);
     else if (m < 0xa0) items = m & 0x0f;
     else if (m < 0xc0) p += m & 0x1f;
     else {
-      switch (m) {
-        case 0xc4: case 0xd9: if (p + 1 > end) return -1; p += 1 + b[p]; break;
-        case 0xc5: case 0xda: if (p + 2 > end) return -1; p += 2 + ((b[p] << 8) | b[p + 1]); break;
-        case 0xc6:
-          if (p + 4 > end) return -1;
-          p += 4 + b[p] * 0x1000000 + ((b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]);
-          break;
-        case 0xc7: if (p + 1 > end) return -1; p += 2 + b[p]; break;
-        case 0xc8: if (p + 2 > end) return -1; p += 3 + ((b[p] << 8) | b[p + 1]); break;
-        case 0xc9:
-          if (p + 4 > end) return -1;
-          p += 5 + b[p] * 0x1000000 + ((b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]);
-          break;
-        case 0xca: case 0xce: case 0xd2: p += 4; break;
-        case 0xcb: case 0xcf: case 0xd3: p += 8; break;
-        case 0xcc: case 0xd0: p += 1; break;
-        case 0xcd: case 0xd1: p += 2; break;
-        case 0xd4: p += 2; break;
-        case 0xd5: p += 3; break;
-        case 0xd6: p += 5; break;
-        case 0xd7: p += 9; break;
-        case 0xd8: p += 17; break;
-        case 0xdc: if (p + 2 > end) return -1; items = (b[p] << 8) | b[p + 1]; p += 2; break;
-        case 0xdd:
-          if (p + 4 > end) return -1;
-          items = b[p] * 0x1000000 + ((b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]);
-          p += 4;
-          break;
-        case 0xde: if (p + 2 > end) return -1; items = 2 * ((b[p] << 8) | b[p + 1]); p += 2; break;
-        case 0xdf:
-          if (p + 4 > end) return -1;
-          items = 2 * (b[p] * 0x1000000 + ((b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]));
-          p += 4;
-          break;
-        default: return -1; // 0xc1 is never used, 0xdb strings are longer than the walker models
+      if (m < MP_FIRST) return -1; // 0xc1 is never used
+      const kind = MP_TABLE[m - MP_FIRST] >> MP_KIND_SHIFT;
+      const n = MP_TABLE[m - MP_FIRST] & MP_COUNT_MASK;
+      if (kind === MP_UNMODELED) return -1;
+      if (kind === MP_NUM || kind === MP_FIXEXT) p += n;
+      else {
+        // a big-endian length or count in n bytes
+        if (p + n > end) return -1;
+        let v = 0;
+        for (let k = 0; k < n; k++) v = v * BYTE_VALUES + b[p++];
+        if (kind === MP_ARRAY) items = v;
+        else if (kind === MP_MAP) items = 2 * v;
+        else p += kind === MP_EXT ? v + 1 : v;
       }
     }
     if (items < 0) return p <= end ? p : -1;
     if (items > end - p) return -1;
-    n = items;
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < items; i++) {
       p = this.mpSkip(p, end, depth + 1);
       if (p < 0) return -1;
     }
@@ -3186,15 +3169,12 @@ export class Codec {
     if (n !== ABSENT) return n;
     n = this.pathN++;
     if (n >= this.pLast.length) {
-      const cap = n * 2;
-      this.pLast = growI32(this.pLast, cap);
-      this.pCtx = growI32(this.pCtx, cap);
-      this.pStr = growI32(this.pStr, cap);
-      this.pNum = growI32(this.pNum, cap);
-      const nl = new Uint16Array(cap * MSG_NUM_POS);
-      nl.set(this.pNumLast);
-      this.pNumLast = nl;
-      this.pEnc = growI32(this.pEnc, cap);
+      this.pLast = withRoom(this.pLast, n + 1);
+      this.pCtx = withRoom(this.pCtx, n + 1);
+      this.pStr = withRoom(this.pStr, n + 1);
+      this.pNum = withRoom(this.pNum, n + 1);
+      this.pNumLast = withRoom(this.pNumLast, (n + 1) * MSG_NUM_POS);
+      this.pEnc = withRoom(this.pEnc, n + 1);
     }
     this.pLast[n] = MARK_NONE;
     this.pCtx[n] = this.rc.alloc(BYTE_VALUES);
@@ -3286,30 +3266,18 @@ export class Codec {
     if (m < 0x90) return this.msgItems(path, m & 0x0f, true, depth + 1);
     if (m < 0xa0) return this.msgItems(path, m & 0x0f, false, depth + 1);
     if (m < 0xc0) return this.msgString(path, m & 0x1f);
-    switch (m) {
-      case 0xd9: return this.msgString(path, this.msgBytes(path, 1));
-      case 0xda: return this.msgString(path, this.msgBytes(path, 2));
-      case 0xc4: return this.byteRun(this.msgBytes(path, 1), ROLE.RAW, RAW_BIN);
-      case 0xc5: return this.byteRun(this.msgBytes(path, 2), ROLE.RAW, RAW_BIN);
-      case 0xc6: return this.byteRun(this.msgBytes(path, 4), ROLE.RAW, RAW_BIN);
-      case 0xc7: return this.byteRun(this.msgBytes(path, 1) + 1, ROLE.RAW, RAW_BIN);
-      case 0xc8: return this.byteRun(this.msgBytes(path, 2) + 1, ROLE.RAW, RAW_BIN);
-      case 0xc9: return this.byteRun(this.msgBytes(path, 4) + 1, ROLE.RAW, RAW_BIN);
-      case 0xca: case 0xce: case 0xd2: this.msgBytes(path, 4); return;
-      case 0xcb: case 0xcf: case 0xd3: this.msgBytes(path, 8); return;
-      case 0xcc: case 0xd0: this.msgBytes(path, 1); return;
-      case 0xcd: case 0xd1: this.msgBytes(path, 2); return;
-      case 0xd4: return this.byteRun(2, ROLE.RAW, RAW_BIN);
-      case 0xd5: return this.byteRun(3, ROLE.RAW, RAW_BIN);
-      case 0xd6: return this.byteRun(5, ROLE.RAW, RAW_BIN);
-      case 0xd7: return this.byteRun(9, ROLE.RAW, RAW_BIN);
-      case 0xd8: return this.byteRun(17, ROLE.RAW, RAW_BIN);
-      case 0xdc: return this.msgItems(path, this.msgBytes(path, 2), false, depth + 1);
-      case 0xdd: return this.msgItems(path, this.msgBytes(path, 4), false, depth + 1);
-      case 0xde: return this.msgItems(path, this.msgBytes(path, 2), true, depth + 1);
-      case 0xdf: return this.msgItems(path, this.msgBytes(path, 4), true, depth + 1);
-      default: throw new Error(CORRUPT);
-    }
+    if (m < MP_FIRST) throw new Error(CORRUPT); // 0xc1 is never used
+    const kind = MP_TABLE[m - MP_FIRST] >> MP_KIND_SHIFT;
+    const n = MP_TABLE[m - MP_FIRST] & MP_COUNT_MASK;
+    if (kind === MP_UNMODELED) throw new Error(CORRUPT);
+    if (kind === MP_FIXEXT) return this.byteRun(n, ROLE.RAW, RAW_BIN);
+    // the n bytes after the marker: a number's payload, or the big-endian length or count of what follows
+    const v = this.msgBytes(path, n);
+    if (kind === MP_STR) this.msgString(path, v);
+    else if (kind === MP_BIN) this.byteRun(v, ROLE.RAW, RAW_BIN);
+    else if (kind === MP_EXT) this.byteRun(v + 1, ROLE.RAW, RAW_BIN);
+    else if (kind === MP_ARRAY) this.msgItems(path, v, false, depth + 1);
+    else if (kind === MP_MAP) this.msgItems(path, v, true, depth + 1);
   }
 
   // ---------------------------------------------------------------- container

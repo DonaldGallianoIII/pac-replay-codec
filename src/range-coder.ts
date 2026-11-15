@@ -27,12 +27,13 @@
  * A build without one of them drops that code; what the rest reads and writes does not change by a bit.
  *
  * @interacts none (owns its output buffer and its state table)
- * @deps      build.ts (the flags)
+ * @deps      build.ts (the flags), arrays.ts (withRoom)
  * @complexity O(1) per decision; a 3.4 MB replay is about 6 million decisions
  * @alloc     the state table and the output buffer grow by doubling; both are released with the coder
  */
 
 import { ENCODE, MEASURE } from './build.ts';
+import { withRoom } from './arrays.ts';
 
 /** Probability scale: p is out of 2^16. */
 const PROB_BITS = 16;
@@ -159,13 +160,7 @@ export class RangeCoder {
   alloc(count: number): number {
     const base = this.used;
     this.used += count;
-    if (this.used > this.st.length) {
-      let cap = this.st.length;
-      while (cap < this.used) cap *= 2;
-      const st = new Uint32Array(cap);
-      st.set(this.st);
-      this.st = st;
-    }
+    if (this.used > this.st.length) this.st = withRoom(this.st, this.used);
     return base;
   }
 
@@ -174,9 +169,7 @@ export class RangeCoder {
    * @build encode
    */
   private growOut(): void {
-    const o = new Uint8Array(this.out.length * 2);
-    o.set(this.out);
-    this.out = o;
+    this.out = withRoom(this.out, this.outLen + 1);
   }
 
   /**

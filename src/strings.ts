@@ -26,6 +26,7 @@
 import { RangeCoder } from './range-coder.ts';
 import { tree2, gamma, gammaSlots, GAMMA_BITS_NARROW } from './symbols.ts';
 import { PairMap, StringPool, Recency, ABSENT } from './intmap.ts';
+import { withRoom } from './arrays.ts';
 import { ENCODE, MEASURE } from './build.ts';
 
 /** Longest string the model accepts, in bytes (the walker never offers a longer one). */
@@ -162,28 +163,18 @@ export class StringModel {
    */
   newField(): number {
     const f = this.fields++;
-    if (f >= this.count.length) this.growFields();
+    if (f >= this.count.length) {
+      this.count = withRoom(this.count, f + 1);
+      this.large = withRoom(this.large, f + 1);
+      this.follows = withRoom(this.follows, (f + 1) * HINT_COLS);
+      this.ctx = withRoom(this.ctx, f + 1);
+      this.smallHi = withRoom(this.smallHi, (f + 1) * HINT_COLS);
+    }
     this.idxOf.push(new Int32Array(CONFIG.DictStart));
     this.idOf.push(new Int32Array(CONFIG.DictStart));
     this.mtf.push(null);
     this.ctx[f] = this.rc.alloc(FIELD_CONTEXTS);
     return f;
-  }
-
-  private growFields(): void {
-    const cap = this.count.length * 2;
-    const i32 = (a: Int32Array, per: number): Int32Array => {
-      const n = new Int32Array(cap * per);
-      n.set(a);
-      return n;
-    };
-    this.count = i32(this.count, 1);
-    const large = new Uint8Array(cap);
-    large.set(this.large);
-    this.large = large;
-    this.follows = i32(this.follows, HINT_COLS);
-    this.ctx = i32(this.ctx, 1);
-    this.smallHi = i32(this.smallHi, HINT_COLS);
   }
 
   /**
@@ -283,20 +274,10 @@ export class StringModel {
   private append(f: number, id: number): number {
     const idx = this.count[f]++;
     let ids = this.idOf[f];
-    if (idx >= ids.length) {
-      const n = new Int32Array(ids.length * 2);
-      n.set(ids);
-      this.idOf[f] = ids = n;
-    }
+    if (idx >= ids.length) this.idOf[f] = ids = withRoom(ids, idx + 1);
     ids[idx] = id;
     let map = this.idxOf[f];
-    if (id >= map.length) {
-      let cap = map.length * 2;
-      while (cap <= id) cap *= 2;
-      const n = new Int32Array(cap);
-      n.set(map);
-      this.idxOf[f] = map = n;
-    }
+    if (id >= map.length) this.idxOf[f] = map = withRoom(map, id + 1);
     map[id] = idx + 1;
     if (this.large[f] !== 0) (this.mtf[f] as Recency).touch(idx);
     else if (this.count[f] > SMALL_MAX) {

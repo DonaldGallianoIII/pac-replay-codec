@@ -13,8 +13,10 @@
  * packaged web/lib entries); the ones that reach into the coder run on the source.
  *
  * @interacts reads test/fixtures/ and, when set, the .colreplay files in REPLAY_DIR; writes nothing. One test
- *            swaps Codec.prototype.encode for the length of the test and puts it back.
- * @deps      support.ts, src/index.ts, src/codec.ts, src/trig.ts, node:test
+ *            swaps Codec.prototype.encode for the length of the test and puts it back; the growth tests shrink
+ *            the starting sizes in the CONFIG of four source modules for the length of a call and put them back.
+ * @deps      support.ts, src/index.ts, src/codec.ts, src/range-coder.ts, src/strings.ts, src/intmap.ts,
+ *            src/trig.ts, node:test
  * @complexity about 30 pack and unpack calls per build on the 20 KB fixtures; with REPLAY_DIR, 4 per replay (R
  *            replays, up to REPLAY_LIMIT) of up to 5 MB each; the relabelled cases code each file with both
  *            predictor sets
@@ -27,11 +29,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { packReplay, unpackReplay, crc32, knowsGameVersion, MODE_CODED, MODE_STORED, PREDICTORS_SCHEMA, PREDICTORS_PAC_MINIGAME } from '../src/index.ts';
-import { Codec } from '../src/codec.ts';
+import { Codec, CONFIG as CODEC_CONFIG } from '../src/codec.ts';
+import { CONFIG as CODER_CONFIG } from '../src/range-coder.ts';
+import { CONFIG as STRINGS_CONFIG } from '../src/strings.ts';
+import { CONFIG as TABLES_CONFIG } from '../src/intmap.ts';
 import { detSin, detCos } from '../src/trig.ts';
 import { BUILDS, PACKERS, SYNTHETIC, REPLAYS, NEEDS_REPLAYS, sha, relabel, damagedCases } from './support.ts';
 import type { Build, Lib } from './support.ts';
 
+const CONFIG = Object.freeze({ /** Real replays run through the tiny-table test (it is the slow one). */ TinyReplays: 3 });
 const packWith = (b: Build): NonNullable<Lib['packReplay']> => b.lib.packReplay as NonNullable<Lib['packReplay']>;
 const roundTrip = (src: Uint8Array, gameAware = true) => {
   const packed = packReplay(src, { gameAware });
@@ -123,6 +129,42 @@ test('the formulas throwing on an unknown version falls back to the schema set; 
   }
 });
 
+/**
+ * Every table of the coder starts at a size a normal game never fills and doubles when it does, so on real
+ * replays most of the growing code never runs. This shrinks every starting size to TinyStart for the length of
+ * `fn`, on the source build (the packaged files have the sizes folded in), and puts them back.
+ */
+function withTinyTables<T>(fn: () => T): T {
+  const tables: [Record<string, number>, string[]][] = [
+    [CODEC_CONFIG as unknown as Record<string, number>, ['HandlesStart', 'SlotsStart', 'RefsStart', 'PairsStart', 'FrameBuf']],
+    [CODER_CONFIG as unknown as Record<string, number>, ['InitialContexts', 'InitialOut']],
+    [STRINGS_CONFIG as unknown as Record<string, number>, ['FieldsStart', 'DictStart']],
+    [TABLES_CONFIG as unknown as Record<string, number>, ['PairStart', 'PoolStart', 'PoolBytesStart', 'RowsStart', 'RecencyStart']],
+  ];
+  const saved = tables.map(([config, keys]) => keys.map((k) => config[k]));
+  for (const [config, keys] of tables) for (const k of keys) config[k] = TINY_START;
+  try {
+    return fn();
+  } finally {
+    tables.forEach(([config, keys], i) => keys.forEach((k, j) => { config[k] = saved[i][j]; }));
+  }
+}
+/** A power of two, as the hash tables need, and small enough that the first few entries overflow it. */
+const TINY_START = 2;
+
+test('growth: with every table starting at two entries, the source packs the same bytes and unpacks exact', () => {
+  for (const file of SYNTHETIC) {
+    const src = new Uint8Array(fs.readFileSync(file));
+    for (const input of [src, relabel(src, '6.11.2')]) {
+      const normal = packReplay(input);
+      const tiny = withTinyTables(() => packReplay(input));
+      assert.equal(sha(tiny.bytes), sha(normal.bytes), `${path.basename(file)}: the packed bytes do not depend on table sizes`);
+      const back = withTinyTables(() => unpackReplay(normal.bytes));
+      assert.equal(sha(back), sha(input), `${path.basename(file)}: unpacks exact with tiny tables`);
+    }
+  }
+});
+
 test('damaged input: every case comes back bit for bit from every build, and never grows by more than the header', () => {
   for (const [name, src] of damagedCases(fs.readFileSync(SYNTHETIC[1]))) {
     for (const p of PACKERS) {
@@ -207,6 +249,16 @@ test('your replays: a 6.11.2 replay relabelled "6.11" and "7.0.0" keeps the smal
     // a 6.11 game under another label still fits the formulas: the two-pass path must find them
     assert.equal(packed.predictors, PREDICTORS_PAC_MINIGAME, `${version}: the formulas win on a 6.11 game`);
     assert.ok(Math.abs(packed.bytes.length - known) < known / 100, `${version}: within 1% of the 6.11.2 size`);
+  }
+});
+
+test('your replays: with every table starting at two entries, the same bytes and exact unpacks', { skip: NEEDS_REPLAYS }, () => {
+  for (const f of REPLAYS.slice(0, CONFIG.TinyReplays)) {
+    const src = new Uint8Array(fs.readFileSync(f));
+    const normal = packReplay(src);
+    const tiny = withTinyTables(() => packReplay(src));
+    assert.equal(sha(tiny.bytes), sha(normal.bytes), `${path.basename(f)}: the packed bytes do not depend on table sizes`);
+    assert.equal(sha(withTinyTables(() => unpackReplay(normal.bytes))), sha(src), `${path.basename(f)}: unpacks exact with tiny tables`);
   }
 });
 
