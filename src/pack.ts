@@ -105,21 +105,21 @@ interface Attempt {
  * @complexity O(file) @alloc the coded body and the coder's tables
  */
 function codeWith(src: Uint8Array, predictors: number, prior: Prior | null, account: boolean): Attempt {
-  const gameAware = predictors === PREDICTORS_PAC_MINIGAME;
+  const formulas = predictors === PREDICTORS_PAC_MINIGAME;
   const rawLen = src.length;
   let codec: Codec;
   let body: Uint8Array | null = null;
   let error: string | null = null;
   if (PRIOR) {
     try {
-      codec = new Codec(src, true, { gameAware, account, rawLen, prior });
+      codec = new Codec(src, true, { formulas, counted: account, rawLen, startModel: prior });
     } catch (e) {
       // a starting model made for another build of the coder: pack cold and say so, never fail
       error = e instanceof Error ? e.message : String(e);
       prior = null;
-      codec = new Codec(src, true, { gameAware, account, rawLen, prior });
+      codec = new Codec(src, true, { formulas, counted: account, rawLen, startModel: prior });
     }
-  } else codec = new Codec(src, true, { gameAware, account, rawLen, prior: null });
+  } else codec = new Codec(src, true, { formulas, counted: account, rawLen, startModel: null });
   try {
     body = codec.encode();
   } catch (e) {

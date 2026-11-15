@@ -7,12 +7,13 @@
  * file with the error every build gives when the model was not handed in.
  *
  * @interacts codec.ts (the coder), container.ts and clrp.ts (header layout), crc32.ts
- * @deps      codec.ts, container.ts, clrp.ts, crc32.ts, build.ts (PRIOR)
+ * @deps      codec.ts, range-coder.ts (the damage message), container.ts, clrp.ts, crc32.ts, build.ts (PRIOR)
  * @complexity O(file): one pass to decode, one table-driven crc32 pass (about 1 ns per byte)
  * @alloc     the original bytes, plus the coder's tables for the length of the call
  */
 import { Codec } from './codec.ts';
 import { crc32 } from './crc32.ts';
+import { CORRUPT } from './range-coder.ts';
 import { MAGIC_BYTES, VARINT_BASE, VARINT_CONTINUE, VARINT_DATA, VARINT_MAX_BYTES, u32At } from './clrp.ts';
 import {
   CONTAINER_MAGIC, FORMAT_VERSION, PREDICTORS_SCHEMA, PREDICTORS_PAC_MINIGAME, MODE_CODED, MODE_STORED, MODE_PRIOR,
@@ -67,13 +68,13 @@ export function unpackReplay(packed: Uint8Array, priors: readonly Prior[] = []):
   let out: Uint8Array;
   if (mode === MODE_STORED) {
     // a stored body is the original itself, so its size claim cannot make the unpacker allocate more than the file
-    if (body.length !== rawLen) throw new Error('packed data is damaged');
+    if (body.length !== rawLen) throw new Error(CORRUPT);
     out = body.slice();
   } else {
     // checked before the coder allocates rawLen bytes: a crafted header must not exhaust memory
     if (rawLen > MAX_ORIGINAL_BYTES || rawLen > (body.length + 1) * EXPANSION_MAX) throw new Error(HEADER_DAMAGED);
-    out = new Codec(body, false, { gameAware: predictors === PREDICTORS_PAC_MINIGAME, account: false, rawLen, prior }).decode();
+    out = new Codec(body, false, { formulas: predictors === PREDICTORS_PAC_MINIGAME, counted: false, rawLen, startModel: prior }).decode();
   }
-  if (crc32(out) !== crc) throw new Error('packed data is damaged (crc32 mismatch)');
+  if (crc32(out) !== crc) throw new Error(`${CORRUPT} (crc32 mismatch)`);
   return out;
 }

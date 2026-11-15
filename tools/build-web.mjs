@@ -298,6 +298,10 @@ function compressOptions(map) {
       pure_getters: true,
       keep_fargs: false,
       hoist_props: true,
+      // a function used once stays a function. Folded into its caller it becomes a function expression called in
+      // place, which the engine allocates on every call until its top tier removes it: measured 4 to 7% slower,
+      // and a few bytes larger after gzip
+      reduce_funcs: false,
       // floating point is part of the packed format: never reorder or merge arithmetic
       unsafe_math: false,
       // the public calls return real booleans

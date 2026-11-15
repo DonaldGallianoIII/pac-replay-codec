@@ -189,7 +189,7 @@ export function handMadePrior(src: Uint8Array): PriorParts {
   };
   // the context count a file must record: load the draft into a coder that does not check it
   const draft = { ...source.parsePrior(writePrior({ ...parts, contexts: 1 })), contexts: CONTEXTS_UNCHECKED };
-  parts.contexts = new Codec(new Uint8Array(0), true, { gameAware: false, account: false, rawLen: 0, prior: draft }).rc.used;
+  parts.contexts = new Codec(new Uint8Array(0), true, { formulas: false, counted: false, rawLen: 0, startModel: draft }).rc.used;
   parts.states = [{ index: 70000, code: stateCode(5, 3) }, { index: parts.contexts - 1, code: stateCode(60, 0) }];
   return parts;
 }

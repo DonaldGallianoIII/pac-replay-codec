@@ -23,8 +23,8 @@
  * @complexity O(log n) per string for its recency rank (n distinct values of the field), O(length) for the pool
  * @alloc     per distinct string per field: a few integers. Nothing per coded string.
  */
-import { RangeCoder } from './range-coder.ts';
-import { tree2, gamma, gammaSlots, GAMMA_BITS_NARROW } from './symbols.ts';
+import { RangeCoder, CORRUPT } from './range-coder.ts';
+import { tree2, gamma1, gammaSlots, GAMMA_BITS_NARROW } from './symbols.ts';
 import { PairMap, StringPool, Recency, ABSENT } from './intmap.ts';
 import { withRoom } from './arrays.ts';
 import { ENCODE, MEASURE } from './build.ts';
@@ -328,7 +328,7 @@ export class StringModel {
         const sym = tree2(rc, this.hintBlock(f, h), ctx + CTX_SMALL_LO, SMALL_BITS, enc ? idx + 1 : 0);
         if (sym > 0) {
           idx = sym - 1;
-          if (idx >= cnt) throw new Error('packed data is damaged');
+          if (idx >= cnt) throw new Error(CORRUPT);
         } else {
           id = this.codeNew(f, id, b, s, e, role);
           idx = this.append(f, id);
@@ -342,10 +342,10 @@ export class StringModel {
     const m = this.mtf[f] as Recency;
     const rank = enc && idx >= 0 ? m.rankOf(idx) : -1;
     const base = ctx + CTX_LARGE;
-    const sym = gamma(rc, base, GAMMA_BITS_NARROW, base + (1 << GAMMA_BITS_NARROW), enc ? rank + 1 : 0);
+    const sym = gamma1(rc, base, GAMMA_BITS_NARROW, enc ? rank + 1 : 0);
     if (sym > 0) {
       idx = m.itemAtRank(sym - 1);
-      if (idx === ABSENT) throw new Error('packed data is damaged');
+      if (idx === ABSENT) throw new Error(CORRUPT);
       m.touch(idx);
     } else {
       id = this.codeNew(f, id, b, s, e, role);
@@ -365,9 +365,9 @@ export class StringModel {
     if (known !== 0) {
       const g = this.gmtf;
       const base = ctx + CTX_POOL_RANK;
-      const rank = gamma(rc, base, GAMMA_BITS_NARROW, base + (1 << GAMMA_BITS_NARROW), enc ? g.rankOf(id) : 0);
+      const rank = gamma1(rc, base, GAMMA_BITS_NARROW, enc ? g.rankOf(id) : 0);
       id = g.itemAtRank(rank);
-      if (id === ABSENT) throw new Error('packed data is damaged');
+      if (id === ABSENT) throw new Error(CORRUPT);
       g.touch(id);
       return id;
     }
@@ -385,8 +385,8 @@ export class StringModel {
       }
     } else {
       const base = ctx + CTX_LEN;
-      n = gamma(rc, base, GAMMA_BITS_NARROW, base + (1 << GAMMA_BITS_NARROW), enc ? e - s : 0);
-      if (n > STR_MAX) throw new Error('literal string too long');
+      n = gamma1(rc, base, GAMMA_BITS_NARROW, enc ? e - s : 0);
+      if (n > STR_MAX) throw new Error(CORRUPT); // only damaged data asks for one: the walker never offers a longer string
       let prev = 0;
       for (let i = 0; i < n; i++) {
         const pos = i > POS_MAX ? POS_MAX : i;
@@ -405,7 +405,7 @@ export class StringModel {
       this.literalBytes += n;
     }
     // the pool keeps the decoded bytes; when encoding they equal b[s..e)
-    if (this.pool.find(lit, 0, n) !== ABSENT && !enc) throw new Error('literal already in the pool');
+    if (this.pool.find(lit, 0, n) !== ABSENT && !enc) throw new Error(CORRUPT); // a literal is by definition new to the pool
     if (enc) {
       this.pool.find(b, s, e);
       id = this.pool.add(b, s, e);

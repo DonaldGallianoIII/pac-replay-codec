@@ -92,7 +92,7 @@ test('a prior made for another table layout is refused, not misread', () => {
   const src = fs.readFileSync(SOURCE);
   const parts = handMade(src);
   const wrong = parsePrior(writePrior({ ...parts, contexts: parts.contexts + 64 }));
-  assert.throws(() => new Codec(new Uint8Array(0), true, { gameAware: false, account: false, rawLen: 0, prior: wrong }), /does not fit this build/);
+  assert.throws(() => new Codec(new Uint8Array(0), true, { formulas: false, counted: false, rawLen: 0, startModel: wrong }), /does not fit this build/);
   // packReplay never fails: it packs cold, says why, and the file needs no prior
   const packed = packReplay(src, { prior: wrong });
   assert.equal(packed.mode, MODE_CODED);
@@ -101,5 +101,5 @@ test('a prior made for another table layout is refused, not misread', () => {
   assert.equal(sha(packed.bytes), sha(packReplay(src).bytes));
   assert.equal(sha(unpackReplay(packed.bytes)), sha(src));
   const outside = parsePrior(writePrior({ ...parts, states: [], blocks: [{ site: SITE.BYTE, a: 40000, b: 0, c: 0 }] }));
-  assert.throws(() => new Codec(new Uint8Array(0), true, { gameAware: false, account: false, rawLen: 0, prior: { ...outside, contexts: CONTEXTS_UNCHECKED } }), /does not fit this build/);
+  assert.throws(() => new Codec(new Uint8Array(0), true, { formulas: false, counted: false, rawLen: 0, startModel: { ...outside, contexts: CONTEXTS_UNCHECKED } }), /does not fit this build/);
 });

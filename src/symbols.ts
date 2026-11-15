@@ -65,21 +65,10 @@ export function sizeClass(v: number): number {
 }
 
 /**
- * Code a non-negative integer below 2^53. The size class is a tree symbol of `classBits` bits rooted at
- * `classBase`; the modeled bits below the leading one use contexts at `tailBase + class * GAMMA_CLASS_SLOTS`.
- * A caller that wants the class tree in a specific context and the tail in a shared one passes two bases.
- * Returns the integer.
+ * Code a non-negative integer below 2^53 in one block of gammaSlots(classBits) contexts at `base`: the size class
+ * as a tree symbol of `classBits` bits, then the modeled bits below the leading one, in the contexts right after
+ * the class tree. Returns the integer.
  * @complexity O(classBits + GAMMA_MODELED) coded bits plus one raw call per 16 further bits @alloc none
- */
-export function gamma(rc: RangeCoder, classBase: number, classBits: number, tailBase: number, v: number): number {
-  const cls = tree(rc, classBase, classBits, ENCODE && rc.enc ? sizeClass(v) : 0);
-  return gammaTail(rc, tailBase, cls, v);
-}
-
-/**
- * gamma() with the usual block layout: the class tree at `base`, the tail contexts right after it. The block is
- * gammaSlots(classBits) contexts. Returns the integer.
- * @complexity as gamma @alloc none
  */
 export function gamma1(rc: RangeCoder, base: number, classBits: number, v: number): number {
   const cls = tree(rc, base, classBits, ENCODE && rc.enc ? sizeClass(v) : 0);
@@ -90,7 +79,7 @@ export function gamma1(rc: RangeCoder, base: number, classBits: number, v: numbe
  * Gamma with backoff on the size class: the class tree uses the specific block `hi` (2^classBits contexts) once it
  * has history, else the general block `lo` (gammaSlots(classBits) contexts, whose tail part codes the lower bits).
  * Returns the integer.
- * @complexity as gamma @alloc none
+ * @complexity as gamma1 @alloc none
  */
 export function gamma2(rc: RangeCoder, hi: number, lo: number, classBits: number, v: number): number {
   const cls = tree2(rc, hi, lo, classBits, ENCODE && rc.enc ? sizeClass(v) : 0);

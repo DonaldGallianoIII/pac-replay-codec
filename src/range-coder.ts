@@ -52,6 +52,8 @@ const BYTE_SHIFT = 8;
 const FLUSH_BYTES = 4;
 /** Bytes a decoder may read past the end of its input before it gives up. A sound stream never reads any. */
 const PAD_MAX = 4;
+/** The one message for packed data that cannot be what a packer wrote. */
+export const CORRUPT = 'packed data is damaged';
 /** Most raw bits one raw() call may carry (range keeps at least 8 bits). */
 export const RAW_BITS_MAX = 16;
 
@@ -79,8 +81,8 @@ for (let n = 0; n <= COUNT_LIMIT; n++) RATE[n] = Math.floor(65536 / (n + 1.5));
 
 /** The coder: one instance per packed stream, encoding (no input) or decoding (the packed bytes). */
 export class RangeCoder {
-  /** True when encoding. */
-  readonly enc: boolean;
+  /** True when encoding. Read as `ENCODE && rc.enc`: a build that only decodes never makes the field. */
+  declare readonly enc: boolean;
   /** Context states, see the module header. */
   st: Uint32Array;
   /** Contexts handed out so far. Context 0 is never handed out. */
@@ -117,7 +119,6 @@ export class RangeCoder {
    * @complexity O(InitialContexts) @alloc the state table and, when encoding, the output buffer
    */
   constructor(input: Uint8Array | null = null) {
-    this.enc = ENCODE && input === null;
     this.st = new Uint32Array(CONFIG.InitialContexts);
     this.used = 1;
     this.range = -1;
@@ -126,6 +127,7 @@ export class RangeCoder {
     this.over = 0;
     this.code = 0;
     if (ENCODE) {
+      this.enc = input === null;
       this.low = 0;
       this.out = this.enc ? new Uint8Array(CONFIG.InitialOut) : EMPTY;
       this.outLen = 0;
@@ -149,7 +151,7 @@ export class RangeCoder {
    * data; a few zero bytes are allowed, then decoding stops. This is also what bounds the work on any input.
    */
   private pad(): number {
-    if (++this.over > PAD_MAX) throw new Error('packed data is damaged');
+    if (++this.over > PAD_MAX) throw new Error(CORRUPT);
     return 0;
   }
 

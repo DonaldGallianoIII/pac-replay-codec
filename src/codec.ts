@@ -13,10 +13,10 @@
  *               Which structure comes next: switchRef and treeWalk. Which field: what followed last time. The
  *               value: the change from the slot's last value; a new structure's first values from a look-alike.
  *   messages    msgpack walked syntactically, each element in the context of its place in its message type
- *   game-aware  (opts.gameAware) PAC's mini-game: carousel items, portals and their symbols are a closed formula
+ *   game-aware  (opts.formulas) PAC's mini-game: carousel items, portals and their symbols are a closed formula
  *               of a whole-ms clock; avatars walk at a known speed. PAC_MINIGAME holds the constants. Off, the
  *               coder knows only the schema. The caller decides (index.ts gates it on the game version).
- *   prior       (opts.prior) an optional starting model (prior.ts): the type table as one known block, the
+ *   prior       (opts.startModel) an optional starting model (prior.ts): the type table as one known block, the
  *               game's vocabulary in the string dictionaries, and a starting probability for the contexts worth
  *               one. Without it every context starts at one half and every dictionary empty. applyPrior loads
  *               it before the first bit; from then on the coder runs exactly as it does cold.
@@ -50,9 +50,10 @@ import {
 import {
   SWITCH_TO_STRUCTURE, TYPE_ID, OP_ADD, OP_DELETE, OP_CLEAR, OP_REVERSE, OP_DELETE_BY_REFID, OP_MASK, KIND_STRUCT,
   KIND_MAP, KIND_ARRAY, VAL_PRIM, VAL_REF, PRIM_STRING, PRIM_NUMBER, PRIM_BOOLEAN, PRIM_INT8, PRIM_UINT8, PRIM_INT16,
-  PRIM_UINT16, PRIM_FLOAT32, PRIM_WIDTH, Schema, bootSchema, parseReflection,
+  PRIM_UINT16, PRIM_FLOAT32, PRIM_WIDTH, bootSchema, parseReflection,
 } from './wire.ts';
-import { RangeCoder, LAZY_BACKOFF } from './range-coder.ts';
+import type { Schema } from './wire.ts';
+import { RangeCoder, LAZY_BACKOFF, CORRUPT } from './range-coder.ts';
 import {
   tree, tree2, gamma1, gamma2, gammaSlots, sizeClass, zigzag, unzigzag, GAMMA_BITS_WIDE, GAMMA_BITS_NARROW,
   BACKOFF_MIN_COUNT,
@@ -460,7 +461,6 @@ const MP_TABLE = [
   (MP_ARRAY << MP_KIND_SHIFT) | 2, (MP_ARRAY << MP_KIND_SHIFT) | 4, (MP_MAP << MP_KIND_SHIFT) | 2, (MP_MAP << MP_KIND_SHIFT) | 4,
 ];
 
-const CORRUPT = 'packed data is damaged';
 const INTERNAL = 'walker and validator disagree';
 const PRIOR_MISFIT = 'starting model does not fit this build';
 /** The visit context of a byte or 16 bit field: the marker written just before plus one, 0 to this. */
@@ -505,15 +505,19 @@ function unmonotone(m: number): number {
   return m >= 0 ? m : -(m + 1) + SIGN_BIT;
 }
 
+/**
+ * How to make a coder. The names are the coder's own, apart from the public options of packReplay (gameAware,
+ * account, prior), so a packaged build can shorten them.
+ */
 export interface CodecOptions {
   /** Use PAC's mini-game formulas as predictors. Both directions must agree. */
-  gameAware: boolean;
-  /** Collect bit costs and decision counts by role (slower). */
-  account: boolean;
+  formulas: boolean;
+  /** Collect bit costs and decision counts by role (slower). Only a build with MEASURE does. */
+  counted: boolean;
   /** Decode only: size of the original file, the upper bound of what may be written. */
   rawLen: number;
   /** The starting model to load before the first bit is coded, or none. Both directions must use the same one. */
-  prior?: Prior | null;
+  startModel: Prior | null;
 }
 
 /** Counters of one run, for the report and the tests. */
@@ -538,7 +542,8 @@ export class Codec {
   readonly strings: StringModel;
   /** The counters of a packing run. Kept in a build with ENCODE. */
   declare readonly stats: CodecStats;
-  private readonly enc: boolean;
+  /** True when encoding. Read as `ENCODE && this.enc`: a build that only decodes never makes the field. */
+  private declare readonly enc: boolean;
   private readonly formulas: boolean;
   /** Body of the handshake frame the starting model knows (empty: none). Kept in a build with PRIOR. */
   private declare readonly knownHandshake: Uint8Array;
@@ -781,13 +786,13 @@ export class Codec {
    */
   constructor(input: Uint8Array, encode: boolean, opts: CodecOptions) {
     const enc = ENCODE && encode;
-    this.enc = enc;
-    this.formulas = opts.gameAware;
+    if (ENCODE) this.enc = enc;
+    this.formulas = opts.formulas;
     const rc = new RangeCoder(enc ? null : input);
     this.rc = rc;
     if (MEASURE) {
       rc.lazy = TUNING.LazyBackoff !== 0;
-      if (opts.account) {
+      if (opts.counted) {
         rc.account = new Float64Array(ROLE.COUNT);
         rc.decisions = new Float64Array(ROLE.COUNT);
       }
@@ -843,7 +848,7 @@ export class Codec {
     if (TUNING.CollFlag !== 0) this.collSucc = new Uint16Array(CID_SPACE * OP_CODES);
     if (TUNING.TreeFlag !== 0) this.swUpLast = new Uint8Array(CG_SPACE * SW_CLASSES);
     if (PRIOR) {
-      const prior = opts.prior === undefined ? null : opts.prior;
+      const prior = opts.startModel;
       this.knownHandshake = prior !== null ? prior.handshake : EMPTY;
       if (prior !== null) this.applyPrior(prior);
     }

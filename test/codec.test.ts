@@ -77,7 +77,7 @@ test('self-describing: replays from a schema that is not PAC, Colyseus schema 4 
 
 /** The coded body of `src` with one predictor set, straight from the coder. */
 const bodyWith = (src: Uint8Array, gameAware: boolean): Uint8Array =>
-  new Codec(src, true, { gameAware, account: false, rawLen: src.length, prior: null }).encode() as Uint8Array;
+  new Codec(src, true, { formulas: gameAware, counted: false, rawLen: src.length, startModel: null }).encode() as Uint8Array;
 
 /** Pack `src`, check it round trips, and check the packer kept the smaller of the two predictor sets (tie: schema). */
 function packsTheSmaller(src: Uint8Array, label: string) {

@@ -101,33 +101,36 @@ const QUANTIZED_DEFAULT_BITS = 16;
 /** Largest type id the codec accepts (two bytes when coded). */
 export const TYPE_ID_MAX = 65535;
 
-/** The type table of one connection, in flat arrays. Type index is dense; type id is the wire's number. */
-export class Schema {
+/**
+ * The type table of one connection, in flat arrays. Type index is dense; type id is the wire's number. Made by
+ * buildSchema, never changed afterwards.
+ */
+export interface Schema {
   /** Number of types. */
-  count = 0;
+  count: number;
   /** type id -> type index, -1 when the id is unknown. */
-  indexOfId: Int32Array = new Int32Array(0);
+  indexOfId: Int32Array;
   /** Per type: its wire id. */
-  idOf: Int32Array = new Int32Array(0);
+  idOf: Int32Array;
   /** Per type: type index of its topmost ancestor (itself when it extends nothing). */
-  baseOf: Int32Array = new Int32Array(0);
+  baseOf: Int32Array;
   /** Per type: where its fields start in the field arrays, and how many it has (inherited ones included). */
-  fieldStart: Int32Array = new Int32Array(0);
-  fieldCount: Int32Array = new Int32Array(0);
+  fieldStart: Int32Array;
+  fieldCount: Int32Array;
   /** Per field: VAL_PRIM, VAL_REF or VAL_COLL. */
-  fVal: Uint8Array = new Uint8Array(0);
+  fVal: Uint8Array;
   /** Per field: its primitive (VAL_PRIM), or its items' primitive (VAL_COLL of primitives). */
-  fPrim: Uint8Array = new Uint8Array(0);
+  fPrim: Uint8Array;
   /** Per field: collection kind (VAL_COLL). */
-  fKind: Uint8Array = new Uint8Array(0);
+  fKind: Uint8Array;
   /** Per field: VAL_PRIM or VAL_REF of a collection's items (VAL_COLL). */
-  fChildVal: Uint8Array = new Uint8Array(0);
+  fChildVal: Uint8Array;
   /** Per field: type index of the struct it holds (VAL_REF) or its items are (VAL_COLL of structs), else -1. */
-  fType: Int32Array = new Int32Array(0);
+  fType: Int32Array;
   /** Per field: its name. Used once per schema to find game-aware fields by name, never while coding. */
-  fName: string[] = [];
+  fName: string[];
   /** Type index of the root state. */
-  root = 0;
+  root: number;
 }
 
 /** Where the last readInt or stringStart call ended (the byte after the token). */
@@ -226,26 +229,32 @@ const BOOT_TYPE = 1;
 const BOOT_FIELD = 2;
 const BOOT_QUANTIZED = 3;
 
-function rawField(name: string, type: string, referencedType: number): RawField {
-  return { name, type, referencedType, childPrimitive: null, bits: UNSET };
-}
+/**
+ * The fields of the reflection's own four types, as [type, referenced type]. The names are in the comments only:
+ * the reader goes by position, and nothing looks a field of these types up by name.
+ */
+const BOOT_FIELDS: [string, number][][] = [
+  // Reflection: types, rootType
+  [['array', BOOT_TYPE], ['number', UNSET]],
+  // Type: id, extendsId, fields
+  [['number', UNSET], ['number', UNSET], ['array', BOOT_FIELD]],
+  // Field: name, type, referencedType, childPrimitive, quantized
+  [['string', UNSET], ['string', UNSET], ['number', UNSET], ['string', UNSET], ['ref', BOOT_QUANTIZED]],
+  // Quantized: min, max, bits, mode
+  [['float64', UNSET], ['float64', UNSET], ['uint8', UNSET], ['uint8', UNSET]],
+];
 
 /**
  * The fixed schema of the reflection itself, so the codec can walk a handshake like any other state frame.
  * @interacts none @deps none @complexity O(1) @alloc a 4 type table
  */
 export function bootSchema(): Schema {
-  const types: RawType[] = [
-    { id: BOOT_REFLECTION, extendsId: UNSET, fields: [rawField('types', 'array', BOOT_TYPE), rawField('rootType', 'number', UNSET)] },
-    { id: BOOT_TYPE, extendsId: UNSET, fields: [rawField('id', 'number', UNSET), rawField('extendsId', 'number', UNSET), rawField('fields', 'array', BOOT_FIELD)] },
-    { id: BOOT_FIELD, extendsId: UNSET, fields: [
-      rawField('name', 'string', UNSET), rawField('type', 'string', UNSET), rawField('referencedType', 'number', UNSET),
-      rawField('childPrimitive', 'string', UNSET), rawField('quantized', 'ref', BOOT_QUANTIZED),
-    ] },
-    { id: BOOT_QUANTIZED, extendsId: UNSET, fields: [
-      rawField('min', 'float64', UNSET), rawField('max', 'float64', UNSET), rawField('bits', 'uint8', UNSET), rawField('mode', 'uint8', UNSET),
-    ] },
-  ];
+  const types: RawType[] = [];
+  for (let id = 0; id < BOOT_FIELDS.length; id++) {
+    const fields: RawField[] = [];
+    for (const [type, referencedType] of BOOT_FIELDS[id]) fields.push({ name: '', type, referencedType, childPrimitive: null, bits: UNSET });
+    types.push({ id, extendsId: UNSET, fields });
+  }
   return buildSchema(types, BOOT_REFLECTION);
 }
 
@@ -257,26 +266,24 @@ function primId(name: string): number {
 
 /** Turn the reflection's types into flat arrays. Parent fields come first, as on the wire. */
 function buildSchema(raw: RawType[], rootId: number): Schema {
-  const s = new Schema();
   const n = raw.length;
   let maxId = 0;
   for (const t of raw) {
     if (t.id < 0 || t.id > TYPE_ID_MAX) throw refuse('bad type id');
     if (t.id > maxId) maxId = t.id;
   }
-  s.count = n;
-  s.indexOfId = new Int32Array(maxId + 1).fill(-1);
-  s.idOf = new Int32Array(n);
+  const indexOfId = new Int32Array(maxId + 1).fill(-1);
+  const idOf = new Int32Array(n);
   for (let i = 0; i < n; i++) {
-    s.indexOfId[raw[i].id] = i;
-    s.idOf[i] = raw[i].id;
+    indexOfId[raw[i].id] = i;
+    idOf[i] = raw[i].id;
   }
   // full field lists, parents first. Resolved without recursion: climb to the nearest resolved ancestor, then fill
   // back down. A chain longer than the number of types is a loop.
   const parent = new Int32Array(n);
   for (let i = 0; i < n; i++) {
     const e = raw[i].extendsId;
-    parent[i] = e >= 0 && e <= maxId ? s.indexOfId[e] : -1;
+    parent[i] = e >= 0 && e <= maxId ? indexOfId[e] : -1;
   }
   const full: (RawField[] | null)[] = new Array<RawField[] | null>(n).fill(null);
   const base = new Int32Array(n);
@@ -300,15 +307,11 @@ function buildSchema(raw: RawType[], rootId: number): Schema {
   }
   let total = 0;
   for (let i = 0; i < n; i++) total += (full[i] as RawField[]).length;
-  s.baseOf = base;
-  s.fieldStart = new Int32Array(n);
-  s.fieldCount = new Int32Array(n);
-  s.fVal = new Uint8Array(total);
-  s.fPrim = new Uint8Array(total);
-  s.fKind = new Uint8Array(total);
-  s.fChildVal = new Uint8Array(total);
-  s.fType = new Int32Array(total).fill(-1);
-  s.fName = new Array<string>(total);
+  const s: Schema = {
+    count: n, indexOfId, idOf, baseOf: base, fieldStart: new Int32Array(n), fieldCount: new Int32Array(n),
+    fVal: new Uint8Array(total), fPrim: new Uint8Array(total), fKind: new Uint8Array(total),
+    fChildVal: new Uint8Array(total), fType: new Int32Array(total).fill(-1), fName: new Array<string>(total), root: 0,
+  };
   let at = 0;
   for (let i = 0; i < n; i++) {
     const list = full[i] as RawField[];
@@ -316,7 +319,7 @@ function buildSchema(raw: RawType[], rootId: number): Schema {
     s.fieldCount[i] = list.length;
     for (const f of list) {
       s.fName[at] = f.name;
-      const typeIndex = f.referencedType >= 0 && f.referencedType <= maxId ? s.indexOfId[f.referencedType] : -1;
+      const typeIndex = f.referencedType >= 0 && f.referencedType <= maxId ? indexOfId[f.referencedType] : -1;
       const colon = f.type.indexOf(':');
       const head = colon < 0 ? f.type : f.type.slice(0, colon);
       if (f.type === 'quantized') {
@@ -348,7 +351,7 @@ function buildSchema(raw: RawType[], rootId: number): Schema {
       at++;
     }
   }
-  const root = rootId >= 0 && rootId <= maxId ? s.indexOfId[rootId] : -1;
+  const root = rootId >= 0 && rootId <= maxId ? indexOfId[rootId] : -1;
   if (root < 0) throw refuse('root type missing');
   s.root = root;
   return s;
