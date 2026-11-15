@@ -9,7 +9,7 @@
  * header so the unpacker never has to guess.
  *
  * @interacts codec.ts (the coder), container.ts and clrp.ts (header layout), prior.ts (the starting model), crc32.ts
- * @deps      codec.ts, container.ts, clrp.ts, prior.ts, crc32.ts, build.ts (MEASURE)
+ * @deps      codec.ts, container.ts, clrp.ts, prior.ts, crc32.ts, build.ts (MEASURE, PRIOR)
  * @complexity O(file): one pass to code (two for a game version this build does not name), one crc32 pass
  * @alloc     the packed bytes, plus the coder's tables for the length of the call
  */
@@ -22,7 +22,7 @@ import {
   U32_BYTES, BITS_PER_BYTE, MAX_ORIGINAL_BYTES, EXPANSION_MAX,
 } from './container.ts';
 import type { Prior } from './prior.ts';
-import { MEASURE } from './build.ts';
+import { MEASURE, PRIOR } from './build.ts';
 
 /**
  * The game versions whose mini-game formulas this build knows, as the exact text PAC's recorder writes at the
@@ -58,7 +58,10 @@ export interface PackOptions {
    * from source it works, the packaged library ignores it.
    */
   account?: boolean;
-  /** A starting model (parsePrior). Used when it knows the replay's type table; else the replay is packed cold. */
+  /**
+   * A starting model (parsePrior). Used when it knows the replay's type table; else the replay is packed cold. A
+   * build without PRIOR (pac-replay-codec/encode) ignores it and always packs cold.
+   */
   prior?: Prior | null;
   /** true: use the starting model even when the replay's type table is not the one it was trained on. */
   priorAlways?: boolean;
@@ -107,14 +110,16 @@ function codeWith(src: Uint8Array, predictors: number, prior: Prior | null, acco
   let codec: Codec;
   let body: Uint8Array | null = null;
   let error: string | null = null;
-  try {
-    codec = new Codec(src, true, { gameAware, account, rawLen, prior });
-  } catch (e) {
-    // a starting model made for another build of the coder: pack cold and say so, never fail
-    error = e instanceof Error ? e.message : String(e);
-    prior = null;
-    codec = new Codec(src, true, { gameAware, account, rawLen, prior });
-  }
+  if (PRIOR) {
+    try {
+      codec = new Codec(src, true, { gameAware, account, rawLen, prior });
+    } catch (e) {
+      // a starting model made for another build of the coder: pack cold and say so, never fail
+      error = e instanceof Error ? e.message : String(e);
+      prior = null;
+      codec = new Codec(src, true, { gameAware, account, rawLen, prior });
+    }
+  } else codec = new Codec(src, true, { gameAware, account, rawLen, prior: null });
   try {
     body = codec.encode();
   } catch (e) {
@@ -162,7 +167,7 @@ function codeEitherWay(src: Uint8Array, prior: Prior | null, account: boolean): 
  * @alloc the packed bytes and the coder's tables (two of each, briefly, on the two-pass path)
  */
 export function packReplay(src: Uint8Array, opts: PackOptions = {}): PackResult {
-  const prior = opts.prior != null && (opts.priorAlways === true || priorKnows(opts.prior, src)) ? opts.prior : null;
+  const prior = PRIOR && opts.prior != null && (opts.priorAlways === true || priorKnows(opts.prior, src)) ? opts.prior : null;
   const account = opts.account === true;
   let attempt: Attempt;
   if (src.length > MAX_ORIGINAL_BYTES) {
@@ -177,7 +182,7 @@ export function packReplay(src: Uint8Array, opts: PackOptions = {}): PackResult 
   }
   const { predictors, codec, body, error } = attempt;
   const stored = body === null || body.length >= src.length;
-  const used = stored ? null : attempt.prior;
+  const used = PRIOR && !stored ? attempt.prior : null;
   const payload = stored ? src : (body as Uint8Array);
   const mode = stored ? MODE_STORED : used !== null ? MODE_PRIOR : MODE_CODED;
   const head: number[] = [...CONTAINER_MAGIC, FORMAT_VERSION, stored ? PREDICTORS_SCHEMA : predictors, mode];

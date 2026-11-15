@@ -1,9 +1,9 @@
 /**
- * Type-level check, no runtime: the hand-written types/index.d.ts and types/decode.d.ts must stay assignable to
- * and from the real signatures in src/index.ts and src/decode.ts. Run by the type check (`tsc -p tsconfig.json`),
- * which fails on any drift.
+ * Type-level check, no runtime: the hand-written types/index.d.ts, types/encode.d.ts and types/decode.d.ts must
+ * stay assignable to and from the real signatures in src/index.ts, src/encode.ts and src/decode.ts. Run by the
+ * type check (`tsc -p tsconfig.json`), which fails on any drift.
  *
- * @interacts types/index.d.ts, types/decode.d.ts, src/index.ts, src/decode.ts (types only)
+ * @interacts types/*.d.ts, src/index.ts, src/encode.ts, src/decode.ts (types only)
  * @deps      typescript
  * @complexity O(1)
  * @alloc     none at runtime (type-only imports)
@@ -12,6 +12,8 @@ import type * as Lib from '../types/index.d.ts';
 import type * as Src from '../src/index.ts';
 import type * as DecodeLib from '../types/decode.d.ts';
 import type * as DecodeSrc from '../src/decode.ts';
+import type * as EncodeLib from '../types/encode.d.ts';
+import type * as EncodeSrc from '../src/encode.ts';
 
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 type Assignable<From, To> = [From] extends [To] ? true : false;
@@ -36,3 +38,10 @@ export const decodeInput: Same<Parameters<typeof DecodeLib.unpackReplay>[0], Par
 export const decodeReturn: Same<ReturnType<typeof DecodeLib.unpackReplay>, ReturnType<typeof DecodeSrc.unpackReplay>> = true;
 export const decodeCall: Assignable<typeof DecodeSrc.unpackReplay, typeof DecodeLib.unpackReplay> = true;
 export const decodeNames: Same<keyof typeof DecodeLib, keyof typeof DecodeSrc> = true;
+
+// The packing entry: the same two calls as the library, with the starting-model options left out of the types.
+export const encodeNames: Same<keyof typeof EncodeLib, keyof typeof EncodeSrc> = true;
+export const encodeInput: Same<Parameters<typeof EncodeLib.packReplay>[0], Parameters<typeof EncodeSrc.packReplay>[0]> = true;
+export const encodeOptions: Assignable<NonNullable<Parameters<typeof EncodeLib.packReplay>[1]>, EncodeSrc.PackOptions> = true;
+export const encodeResult: Assignable<EncodeSrc.PackResult, EncodeLib.PackResult> = true;
+export const encodeUnpack: Assignable<typeof EncodeSrc.unpackReplay, typeof EncodeLib.unpackReplay> = true;

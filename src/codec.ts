@@ -140,9 +140,6 @@ const PAC_MINIGAME = {
   CenterY: 235,
   RadiusX: 150,
   RadiusY: 125,
-  /** Root collections whose structures ride the carousel, and their angular speed in rad per ms. */
-  CarouselFields: ['floatingItems', 'portals'],
-  CarouselSpeeds: [0.0004, 0.0003],
   SymbolField: 'symbols',
   SymbolSpeed: 0.0006,
   SymbolRadius: 25,
@@ -154,6 +151,13 @@ const PAC_MINIGAME = {
   /** Three physics steps per patch, each losing 0.06% per ms: distance(d ms) = 0.12 d (1 - 0.0002 d). */
   AvatarDrag: 0.0002,
 } as const;
+
+/**
+ * Root collections whose structures ride the carousel, and their angular speed in rad per ms. Kept apart from
+ * PAC_MINIGAME so that object holds plain values only and a packaged build can fold it into the code.
+ */
+const PAC_CAROUSEL_FIELDS = ['floatingItems', 'portals'];
+const PAC_CAROUSEL_SPEEDS = [0.0004, 0.0003];
 
 export const CONFIG = {
   /** ms: how far past the last clock value the encoder searches for this frame's. */
@@ -1453,13 +1457,13 @@ export class Codec {
 
   /** Game-aware: find the structures of PAC's mini-game by field name, so a renumbered schema still works. */
   private findGameTypes(s: Schema): void {
-    for (let c = 0; c < PAC_MINIGAME.CarouselFields.length; c++) {
-      const t = this.rootItemType(s, PAC_MINIGAME.CarouselFields[c]);
+    for (let c = 0; c < PAC_CAROUSEL_FIELDS.length; c++) {
+      const t = this.rootItemType(s, PAC_CAROUSEL_FIELDS[c]);
       if (t < 0) continue;
       const ix = this.findField(s, t, 'x');
       const iy = this.findField(s, t, 'y');
       if (ix < 0 || iy < 0) continue;
-      this.tCar[t] = PAC_MINIGAME.CarouselSpeeds[c];
+      this.tCar[t] = PAC_CAROUSEL_SPEEDS[c];
       this.tCarIx[t] = ix;
       this.tCarIy[t] = iy;
       this.tCarId[t] = this.findField(s, t, 'id');
@@ -1907,13 +1911,13 @@ export class Codec {
           // How sure the guess is depends on what was guessed and where the guess came from. The first field of a
           // visit also depends on what the structure before just changed (a hit, then its meter).
           fbase = prevHead === HEAD_START ? this.ctx(this.headFlagStart, sk, HEAD_FLAGS) : this.ctx(this.headFlag, gk, HEAD_FLAGS);
-          hit = rc.bit(fbase + pred * 2 + source, actual + 1 === pred ? 1 : 0);
+          hit = rc.bit(fbase + pred * 2 + source, enc && actual + 1 === pred ? 1 : 0);
         }
         if (hit !== 0) sym = pred - 1;
         else {
           // second guess: what followed in any structure of this type in the same situation, when that differs
           const pred2 = prevHead === HEAD_START ? this.groupStartSucc[sk] : this.groupSucc[gk];
-          if (TUNING.HeadSecond !== 0 && pred !== 0 && pred2 !== 0 && pred2 !== pred && rc.bit(fbase + HEAD_FLAG_BLOCK + pred2, actual + 1 === pred2 ? 1 : 0) !== 0) sym = pred2 - 1;
+          if (TUNING.HeadSecond !== 0 && pred !== 0 && pred2 !== 0 && pred2 !== pred && rc.bit(fbase + HEAD_FLAG_BLOCK + pred2, enc && actual + 1 === pred2 ? 1 : 0) !== 0) sym = pred2 - 1;
           else sym = this.headMissed(gk, pred, actual);
         }
         if (prevHead === HEAD_START) this.groupStartSucc[sk] = sym + 1;
@@ -1929,7 +1933,7 @@ export class Codec {
         const base = this.ctx(this.collCtx, k, COLL_BLOCK);
         const pred = TUNING.CollFlag !== 0 ? this.collSucc[k] : 0;
         let hit = 0;
-        if (TUNING.CollFlag !== 0 && pred !== 0) hit = rc.bit(base + OP_CODE[pred - 1], actual + 1 === pred ? 1 : 0);
+        if (TUNING.CollFlag !== 0 && pred !== 0) hit = rc.bit(base + OP_CODE[pred - 1], enc && actual + 1 === pred ? 1 : 0);
         if (hit !== 0) sym = pred - 1;
         else {
           sym = tree(rc, base + COLL_TREE_OFF, HEAD_BITS, actual);
@@ -1993,6 +1997,7 @@ export class Codec {
    */
   private headMissed(gk: number, pred: number, actual: number): number {
     const rc = this.rc;
+    const enc = ENCODE && this.enc;
     if (TUNING.HeadChain === 0) {
       const sym = tree2(rc, this.sparse(this.headMiss, gk, pred, HEAD_TREE), this.ctx(this.headTree, gk, HEAD_TREE), HEAD_BITS, actual);
       if (sym > HEAD_END) throw new Error(CORRUPT);
@@ -2000,31 +2005,32 @@ export class Codec {
     }
     const hi = this.sparse(this.headMiss, gk, pred, HM_BLOCK);
     const lo = this.ctx(this.headTree, gk, HM_BLOCK);
-    if (pred !== SWITCH_TO_STRUCTURE + 1 && rc.bit2(hi + HM_SWITCH, lo + HM_SWITCH, actual === SWITCH_TO_STRUCTURE ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) return SWITCH_TO_STRUCTURE;
-    if (pred !== HEAD_END + 1 && rc.bit2(hi + HM_END, lo + HM_END, actual === HEAD_END ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) return HEAD_END;
-    const op = tree2(rc, hi + HM_OP, lo + HM_OP, HM_OP_BITS, (actual >>> 6) & 3);
-    return (op << 6) | tree2(rc, hi + HM_FIELD, lo + HM_FIELD, HM_FIELD_BITS, actual & FIELD_MASK);
+    if (pred !== SWITCH_TO_STRUCTURE + 1 && rc.bit2(hi + HM_SWITCH, lo + HM_SWITCH, enc && actual === SWITCH_TO_STRUCTURE ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) return SWITCH_TO_STRUCTURE;
+    if (pred !== HEAD_END + 1 && rc.bit2(hi + HM_END, lo + HM_END, enc && actual === HEAD_END ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) return HEAD_END;
+    const op = tree2(rc, hi + HM_OP, lo + HM_OP, HM_OP_BITS, enc ? (actual >>> 6) & 3 : 0);
+    return (op << 6) | tree2(rc, hi + HM_FIELD, lo + HM_FIELD, HM_FIELD_BITS, enc ? actual & FIELD_MASK : 0);
   }
 
   /** The switch symbol when it is not the pair: a short chain of yes/no questions, most likely answer first. */
   private switchClass(hi: number, lo: number, sym: number): number {
     const rc = this.rc;
+    const enc = ENCODE && this.enc;
     // the plain 6 bit symbol, for measurement; it is also the only form that can say "pair" without the pair bit
     if (TUNING.SwitchChain === 0 || TUNING.SwitchPairFlag === 0) return tree2(rc, hi + SWC_FWDK, lo + SWC_FWDK, SW_BITS, sym);
-    if (rc.bit2(hi + SWC_TREE, lo + SWC_TREE, sym === SW_TREE ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) return SW_TREE;
-    if (rc.bit2(hi + SWC_RECENT, lo + SWC_RECENT, sym >= SW_RECENT && sym < SW_FWD ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) {
-      const r = tree2(rc, hi + SWC_RANK, lo + SWC_RANK, SWC_RANK_BITS, sym - SW_RECENT);
+    if (rc.bit2(hi + SWC_TREE, lo + SWC_TREE, enc && sym === SW_TREE ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) return SW_TREE;
+    if (rc.bit2(hi + SWC_RECENT, lo + SWC_RECENT, enc && sym >= SW_RECENT && sym < SW_FWD ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) {
+      const r = tree2(rc, hi + SWC_RANK, lo + SWC_RANK, SWC_RANK_BITS, enc ? sym - SW_RECENT : 0);
       if (r >= SW_RECENT_MAX) throw new Error(CORRUPT);
       return SW_RECENT + r;
     }
-    if (rc.bit2(hi + SWC_FWD, lo + SWC_FWD, sym >= SW_FWD && sym < SW_BACK ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) {
-      if (rc.bit2(hi + SWC_FWD0, lo + SWC_FWD0, sym === SW_FWD ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) return SW_FWD;
-      const k = tree2(rc, hi + SWC_FWDK, lo + SWC_FWDK, SW_BITS, sym - SW_FWD - 1);
+    if (rc.bit2(hi + SWC_FWD, lo + SWC_FWD, enc && sym >= SW_FWD && sym < SW_BACK ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) {
+      if (rc.bit2(hi + SWC_FWD0, lo + SWC_FWD0, enc && sym === SW_FWD ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) return SW_FWD;
+      const k = tree2(rc, hi + SWC_FWDK, lo + SWC_FWDK, SW_BITS, enc ? sym - SW_FWD - 1 : 0);
       if (k >= SW_FORWARD - 1) throw new Error(CORRUPT);
       return SW_FWD + 1 + k;
     }
-    if (rc.bit2(hi + SWC_BACK, lo + SWC_BACK, sym >= SW_BACK && sym < SW_PENDING ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) {
-      const k = tree2(rc, hi + SWC_BACKK, lo + SWC_BACKK, SWC_BACKK_BITS, sym - SW_BACK);
+    if (rc.bit2(hi + SWC_BACK, lo + SWC_BACK, enc && sym >= SW_BACK && sym < SW_PENDING ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) {
+      const k = tree2(rc, hi + SWC_BACKK, lo + SWC_BACKK, SWC_BACKK_BITS, enc ? sym - SW_BACK : 0);
       if (k >= SW_BACKWARD) throw new Error(CORRUPT);
       return SW_BACK + k;
     }
@@ -2125,7 +2131,7 @@ export class Codec {
     const blk = this.ctx(this.swBlock, g, SW_BLOCK);
     const last = this.hSwLast[from];
     const hasPair = pairHit >= 0 ? 1 : 0;
-    if (hasPair !== 0 && TUNING.SwitchPairFlag !== 0 && rc.bit(blk + SW_FLAG_OFF + last, sym === SW_PAIR ? 1 : 0) !== 0) sym = SW_PAIR;
+    if (hasPair !== 0 && TUNING.SwitchPairFlag !== 0 && rc.bit(blk + SW_FLAG_OFF + last, enc && sym === SW_PAIR ? 1 : 0) !== 0) sym = SW_PAIR;
     else sym = this.switchClass(blk + SW_HI_OFF + (last * 2 + hasPair) * SW_CLASS_BLOCK, blk + SW_LO_OFF, sym);
     let cls: number;
     if (sym === SW_PAIR) {
@@ -2257,7 +2263,7 @@ export class Codec {
     }
     const curLast = this.hSwLast[cur];
     const upGuess = TUNING.TreeFlag !== 0 ? this.swUpLast[g * SW_CLASSES + curLast] : 0;
-    if (TUNING.TreeFlag !== 0 && upGuess !== 0 && rc.bit(blk + SW_UPFLAG_OFF + curLast, up + 1 === upGuess ? 1 : 0) !== 0) up = upGuess - 1;
+    if (TUNING.TreeFlag !== 0 && upGuess !== 0 && rc.bit(blk + SW_UPFLAG_OFF + curLast, enc && up + 1 === upGuess ? 1 : 0) !== 0) up = upGuess - 1;
     else up = tree(rc, blk + SW_UP_OFF + curLast * 8, TREE_UP_BITS, up);
     if (TUNING.TreeFlag !== 0) this.swUpLast[g * SW_CLASSES + curLast] = up + 1;
     if (up === TREE_FALLBACK) return -1;
@@ -2271,7 +2277,7 @@ export class Codec {
       const tb = this.ctx(this.treeBlock, this.hCg[n], TREE_STOPS);
       // "is this the one?" is not asked of `cur` itself: a switch never lands where it started
       if (step > 0 || up > 0) {
-        if (rc.bit(tb + (step < TREE_STOPS ? step : TREE_STOPS - 1), left === 0 && enc ? 1 : 0) !== 0) return n;
+        if (rc.bit(tb + (step < TREE_STOPS ? step : TREE_STOPS - 1), enc && left === 0 ? 1 : 0) !== 0) return n;
       }
       const s3 = step < TREE_STEPS ? step : TREE_STEPS - 1;
       const want = enc ? chain[--left] : -1;
@@ -2289,7 +2295,7 @@ export class Codec {
       // not folded by the minifier)
       let step1 = 0;
       if (enc) step1 = nStruct ? this.hPidx[want] : TUNING.TreeOrdinal !== 0 ? zigzag(this.hOrd[want] - this.hLastKid[n]) : this.orderIndex(n, want);
-      if (TUNING.TreeFlag !== 0 && guess !== 0 && rc.bit(tc, step1 + 1 === guess ? 1 : 0) !== 0) step1 = guess - 1;
+      if (TUNING.TreeFlag !== 0 && guess !== 0 && rc.bit(tc, enc && step1 + 1 === guess ? 1 : 0) !== 0) step1 = guess - 1;
       else step1 = nStruct ? tree(rc, tc, TREE_KID_BITS, step1) : gamma1(rc, tc + 1, GAMMA_BITS_NARROW, step1);
       if (TUNING.TreeFlag !== 0) rows.aux[e] = step1 + 1;
       if (nStruct) {
@@ -2504,7 +2510,7 @@ export class Codec {
           v = this.b[this.p++];
           d = (v - prev) & 0xff;
         }
-        if (TUNING.ByteFlag !== 0 && guess !== 0 && rc.bit2(hi, lo, d + 1 === guess ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) d = guess - 1;
+        if (TUNING.ByteFlag !== 0 && guess !== 0 && rc.bit2(hi, lo, enc && d + 1 === guess ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) d = guess - 1;
         else d = tree2(rc, hi, lo, BYTE_BITS, d);
         if (!enc) {
           v = (prev + d) & 0xff;
@@ -2558,7 +2564,7 @@ export class Codec {
           cls = pre === 0xca ? NUM_F32 : pre === 0xcb ? NUM_F64 : NUM_INT;
         }
         const cb = this.ctx(this.numClsCtx, fid, NUMCLS_BLOCK) + lastCls * 4;
-        if (TUNING.NumClsFlag !== 0 && lastCls !== 0 && rc.bit(cb, cls + 1 === lastCls ? 1 : 0) !== 0) cls = lastCls - 1;
+        if (TUNING.NumClsFlag !== 0 && lastCls !== 0 && rc.bit(cb, enc && cls + 1 === lastCls ? 1 : 0) !== 0) cls = lastCls - 1;
         else cls = tree(rc, cb, 2, cls);
         if (cls === NUM_INT) {
           if (MEASURE) rc.role = ROLE.NUMINT;
@@ -3057,7 +3063,7 @@ export class Codec {
       z = zigzag(monotone(bits) - mp);
     }
     if (TUNING.FloatZeroFlag !== 0) {
-      if (rc.bit2(hi, lo, z === 0 ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) z = 0;
+      if (rc.bit2(hi, lo, enc && z === 0 ? 1 : 0, BACKOFF_MIN_COUNT) !== 0) z = 0;
       else z = 1 + gamma2(rc, hi + 1, lo + 1, GAMMA_BITS_WIDE, z - 1);
     } else z = gamma2(rc, hi + 1, lo + 1, GAMMA_BITS_WIDE, z);
     if (!enc) {
@@ -3200,7 +3206,7 @@ export class Codec {
       const guess = this.pNumLast[mk];
       const actual = enc ? this.b[this.p] : 0;
       const before = prev;
-      if (TUNING.MsgNumFlag !== 0 && guess !== 0 && rc.bit(lo, actual + 1 === guess ? 1 : 0) !== 0) prev = guess - 1;
+      if (TUNING.MsgNumFlag !== 0 && guess !== 0 && rc.bit(lo, enc && actual + 1 === guess ? 1 : 0) !== 0) prev = guess - 1;
       else prev = tree2(rc, this.sparse(this.msgNumHi, mk, before, BYTE_VALUES), lo, BYTE_BITS, actual);
       this.pNumLast[mk] = prev + 1;
       if (!enc) this.b[this.p] = prev;
@@ -3256,7 +3262,7 @@ export class Codec {
     const actual = enc ? this.b[this.p] : 0;
     let m: number;
     if (last === MARK_NONE) m = tree(rc, base, BYTE_BITS, actual);
-    else if (TUNING.MarkFlag !== 0 && rc.bit(base, actual === last ? 1 : 0) !== 0) m = last;
+    else if (TUNING.MarkFlag !== 0 && rc.bit(base, enc && actual === last ? 1 : 0) !== 0) m = last;
     else m = tree2(rc, this.sparse(this.markHi, path, last, BYTE_VALUES), base, BYTE_BITS, actual);
     this.pLast[path] = m;
     if (!enc) this.b[this.p] = m;
@@ -3334,8 +3340,9 @@ export class Codec {
   }
 
   /**
-   * Encode only: true when b[start..end) is the handshake body the starting model carries.
-   * @build encode
+   * Encode only: true when b[start..end) is the handshake body the starting model carries. Called only where a
+   * starting model can be loaded, so the tag names that capability.
+   * @build prior
    */
   private isKnownHandshake(start: number, end: number): boolean {
     const hs = this.knownHandshake;

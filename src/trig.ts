@@ -48,6 +48,8 @@ const HALF = 0.5;
 const QUARTER_PI = 0.7853981633974483;
 /** Above this the two-step reduction is no longer accurate enough; callers never get near it. */
 export const REDUCE_LIMIT = 1048576;
+/** Quarter turns in a full turn. */
+const QUADRANTS = 4;
 
 /** cos(x + y) for |x| <= pi/4, y the tail of x. */
 function kernelCos(x: number, y: number): number {
@@ -84,18 +86,36 @@ function reduce(ax: number): number {
 }
 
 /**
+ * Sine of x turned by `quarter` quarter turns: quarter 0 is sin(x), quarter 1 is cos(x). One body for both,
+ * because after the reduction they differ only in which kernel a quadrant takes and with which sign:
+ * quadrant 0 sin, 1 cos, 2 minus sin, 3 minus cos, and cosine starts one quadrant on.
+ * NaN for a non-finite input or |x| above REDUCE_LIMIT.
+ * @complexity O(1) @alloc none
+ */
+function turned(x: number, quarter: number): number {
+  const ax = x < 0 ? -x : x;
+  let head = ax;
+  let tail = 0;
+  let q = quarter;
+  if (!(ax <= QUARTER_PI)) {
+    if (!(ax <= REDUCE_LIMIT)) return NaN;
+    q += reduce(ax) % QUADRANTS;
+    head = redHead;
+    tail = redTail;
+  }
+  // q runs 0 to 4 here; 4 is quadrant 0 again
+  const k = q % 2 === 0 ? kernelSin(head, tail) : kernelCos(head, tail);
+  const s = q === 2 || q === 3 ? -k : k;
+  // sine is odd, cosine is even
+  return quarter === 0 && x < 0 ? -s : s;
+}
+
+/**
  * Deterministic cosine. NaN for a non-finite input or |x| above REDUCE_LIMIT.
  * @complexity O(1) @alloc none
  */
 export function detCos(x: number): number {
-  const ax = x < 0 ? -x : x;
-  if (ax <= QUARTER_PI) return kernelCos(ax, 0);
-  if (!(ax <= REDUCE_LIMIT)) return NaN;
-  const q = reduce(ax) % 4;
-  if (q === 0) return kernelCos(redHead, redTail);
-  if (q === 1) return -kernelSin(redHead, redTail);
-  if (q === 2) return -kernelCos(redHead, redTail);
-  return kernelSin(redHead, redTail);
+  return turned(x, 1);
 }
 
 /**
@@ -103,16 +123,5 @@ export function detCos(x: number): number {
  * @complexity O(1) @alloc none
  */
 export function detSin(x: number): number {
-  const ax = x < 0 ? -x : x;
-  let s: number;
-  if (ax <= QUARTER_PI) s = kernelSin(ax, 0);
-  else {
-    if (!(ax <= REDUCE_LIMIT)) return NaN;
-    const q = reduce(ax) % 4;
-    if (q === 0) s = kernelSin(redHead, redTail);
-    else if (q === 1) s = kernelCos(redHead, redTail);
-    else if (q === 2) s = -kernelSin(redHead, redTail);
-    else s = -kernelCos(redHead, redTail);
-  }
-  return x < 0 ? -s : s;
+  return turned(x, 0);
 }

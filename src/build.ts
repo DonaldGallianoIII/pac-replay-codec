@@ -3,7 +3,8 @@
  * packaged files tools/build-web.mjs swaps this module for the values of its own table, so each test of a flag
  * becomes a constant and the code behind an off flag is dropped:
  *
- *   web/lib/index.js    ENCODE and PRIOR on, MEASURE off     packs and unpacks
+ *   web/lib/index.js    ENCODE and PRIOR on, MEASURE off     packs, unpacks, loads starting models
+ *   web/lib/encode.js   ENCODE on                             packs and unpacks
  *   web/lib/decode.js   every flag off                        unpacks only
  *
  * A flag guards code the usual way, `if (ENCODE && ...)`. A method that only one capability needs says so in its

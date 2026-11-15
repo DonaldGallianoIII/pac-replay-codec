@@ -35,6 +35,10 @@
       "types": "./types/index.d.ts",
       "default": "./web/lib/index.js"
     },
+    "./encode": {
+      "types": "./types/encode.d.ts",
+      "default": "./web/lib/encode.js"
+    },
     "./decode": {
       "types": "./types/decode.d.ts",
       "default": "./web/lib/decode.js"

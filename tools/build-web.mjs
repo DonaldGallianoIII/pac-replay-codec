@@ -2,7 +2,9 @@
  * Builds the packaged codec from src/ into web/lib/: one minified ES module per entry, no imports, with a source
  * map next to it. The command line tool, the npm package and the web page all run these files.
  *
- *   web/lib/index.js    packs and unpacks (the library entry)
+ *   web/lib/index.js    the library entry: packs, unpacks, loads starting models
+ *   web/lib/encode.js   packs and unpacks, no starting models (pac-replay-codec/encode), for a page that saves
+ *                       replays packed and checks each pack by unpacking it
  *   web/lib/decode.js   unpacks only (pac-replay-codec/decode), for a page that only shows replays
  *
  * How a build gets small, in the order the steps run:
@@ -32,7 +34,7 @@
  * @interacts src/*.ts (read), package.json (name and version for the banner), web/lib/ (replaced on every run)
  * @deps      esbuild, terser, acorn (dev dependencies, pinned to exact versions so the output is reproducible),
  *            node:fs, node:path, node:url, node:zlib (only for --sizes)
- * @complexity O(S) per build, S the size of src/ (about 280 KB): two builds, a few seconds in all
+ * @complexity O(S) per build, S the size of src/ (about 280 KB): three builds, a few seconds in all
  * @alloc     the bundle and its syntax tree, twice per build, released when the build returns
  */
 import { build } from 'esbuild';
@@ -51,6 +53,7 @@ export const CONFIG = Object.freeze({
   /** The packaged builds: entry module, output file, and the value of each flag of src/build.ts. */
   Builds: [
     { out: 'index.js', entry: 'index.ts', flags: { ENCODE: true, MEASURE: false, PRIOR: true } },
+    { out: 'encode.js', entry: 'encode.ts', flags: { ENCODE: true, MEASURE: false, PRIOR: false } },
     { out: 'decode.js', entry: 'decode.ts', flags: { ENCODE: false, MEASURE: false, PRIOR: false } },
   ],
   /** The module that holds the flags. */

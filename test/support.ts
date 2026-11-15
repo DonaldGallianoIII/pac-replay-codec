@@ -4,14 +4,15 @@
  *
  * Builds under test (BUILDS):
  *   source           src/index.ts, every capability on
- *   web/lib/index    the packaged library entry: packs and unpacks
+ *   web/lib/index    the packaged library entry: packs, unpacks, loads starting models
+ *   web/lib/encode   the packaged entry that packs and unpacks, without starting models
  *   web/lib/decode   the packaged unpack-only entry
  * Published releases (RELEASES): pac-replay-codec 1.0.0 and 1.0.1 exactly as they sit on npm. They are dev
  * dependencies under alias names, pinned by integrity hash in package-lock.json, so `npm install` brings the very
  * bytes that were published. Without them the tests that need them skip and say so (NEEDS_RELEASES).
  *
  * @interacts reads test/fixtures/ and, when REPLAY_DIR is set, the .colreplay files in it; loads src/index.ts,
- *            web/lib/index.js, web/lib/decode.js and the two published packages
+ *            web/lib/index.js, web/lib/encode.js, web/lib/decode.js and the two published packages
  * @deps      src/index.ts, src/codec.ts, src/clrp.ts, src/prior.ts, web/lib/ (built by tools/build-web.mjs),
  *            node_modules/pac-replay-codec-1.0.0 and -1.0.1 (npm install)
  * @complexity O(1) to load; each helper is O(input)
@@ -68,8 +69,9 @@ const libFile = (name: string): string => path.join(ROOT, 'web', 'lib', name);
 export const BUILDS: Build[] = [
   { name: 'source', lib: source as unknown as Lib },
   { name: 'web/lib/index', lib: await load(libFile('index.js')) },
+  { name: 'web/lib/encode', lib: await load(libFile('encode.js')) },
+  { name: 'web/lib/decode', lib: await load(libFile('decode.js')) },
 ];
-if (fs.existsSync(libFile('decode.js'))) BUILDS.push({ name: 'web/lib/decode', lib: await load(libFile('decode.js')) });
 /** The builds that can pack. */
 export const PACKERS = BUILDS.filter((b) => typeof b.lib.packReplay === 'function');
 

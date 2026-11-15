@@ -311,7 +311,7 @@ export class StringModel {
       if (id < map.length) idx = map[id] - 1;
     }
     if (tplIdx >= 0 && tplIdx < cnt) {
-      if (rc.bit(ctx + CTX_TPL, idx === tplIdx ? 1 : 0) !== 0) {
+      if (rc.bit(ctx + CTX_TPL, enc && idx === tplIdx ? 1 : 0) !== 0) {
         if (this.large[f] !== 0) (this.mtf[f] as Recency).touch(tplIdx);
         this.codedIndex = tplIdx;
         return this.idOf[f][tplIdx];
@@ -322,10 +322,10 @@ export class StringModel {
       const nk = f * HINT_COLS + h;
       const pred = this.follows[nk];
       let hit = 0;
-      if (pred !== 0) hit = rc.bit(ctx + CTX_NEXT + h, idx + 1 === pred ? 1 : 0);
+      if (pred !== 0) hit = rc.bit(ctx + CTX_NEXT + h, enc && idx + 1 === pred ? 1 : 0);
       if (hit !== 0) idx = pred - 1;
       else {
-        const sym = tree2(rc, this.hintBlock(f, h), ctx + CTX_SMALL_LO, SMALL_BITS, idx + 1);
+        const sym = tree2(rc, this.hintBlock(f, h), ctx + CTX_SMALL_LO, SMALL_BITS, enc ? idx + 1 : 0);
         if (sym > 0) {
           idx = sym - 1;
           if (idx >= cnt) throw new Error('packed data is damaged');
@@ -342,7 +342,7 @@ export class StringModel {
     const m = this.mtf[f] as Recency;
     const rank = enc && idx >= 0 ? m.rankOf(idx) : -1;
     const base = ctx + CTX_LARGE;
-    const sym = gamma(rc, base, GAMMA_BITS_NARROW, base + (1 << GAMMA_BITS_NARROW), rank + 1);
+    const sym = gamma(rc, base, GAMMA_BITS_NARROW, base + (1 << GAMMA_BITS_NARROW), enc ? rank + 1 : 0);
     if (sym > 0) {
       idx = m.itemAtRank(sym - 1);
       if (idx === ABSENT) throw new Error('packed data is damaged');
@@ -361,7 +361,7 @@ export class StringModel {
     const enc = ENCODE && rc.enc;
     const ctx = this.ctx[f];
     if (MEASURE) rc.role = role + ROLE_GLOBAL;
-    const known = rc.bit(ctx + CTX_IN_POOL, id !== ABSENT ? 1 : 0);
+    const known = rc.bit(ctx + CTX_IN_POOL, enc && id !== ABSENT ? 1 : 0);
     if (known !== 0) {
       const g = this.gmtf;
       const base = ctx + CTX_POOL_RANK;
