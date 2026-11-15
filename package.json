@@ -1,6 +1,6 @@
 {
   "name": "pac-replay-codec",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Lossless codec for Pokemon Auto Chess replays: up to 12.4x smaller than the raw file, exact bytes back. Command line tool and library.",
   "keywords": [
     "pokemon-auto-chess",

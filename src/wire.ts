@@ -148,14 +148,38 @@ function refuse(why: string): Error {
 /** Largest integer magnitude the reflection reader accepts: beyond it a double is no longer exact. */
 const INT_EXACT_MAX = 9007199254740992;
 /** First prefix of the sized integers: 0xcc to 0xcf are unsigned in 1, 2, 4, 8 bytes, 0xd0 to 0xd3 signed. */
-const SIZED_INT_FIRST = 0xcc;
-const SIZED_INT_COUNT = 8;
-const SIZES_PER_SIGN = 4;
+export const SIZED_INT_FIRST = 0xcc;
+export const SIZED_INT_COUNT = 8;
+/** Sizes per sign: prefix - SIZED_INT_FIRST is the size below this for unsigned, at or above it for signed. */
+export const SIZES_PER_SIGN = 4;
 const WORD_BYTES = 4;
 const WORD_BITS = 32;
 const BYTE_BITS = 8;
 const BYTE_VALUES = 256;
 const TWO_POW_32 = 4294967296;
+
+/**
+ * The value of a sized integer whose payload starts at b[p]. `size` is its prefix minus SIZED_INT_FIRST: 0 to 3
+ * for unsigned in 1, 2, 4 and 8 bytes, 4 to 7 for signed. The caller has checked that the payload is there.
+ * An eight byte value is exact up to 2^53 and rounded beyond, as a double is.
+ * @complexity O(1) @alloc none
+ */
+export function sizedInt(b: Uint8Array, p: number, size: number): number {
+  const n = 1 << (size % SIZES_PER_SIGN);
+  // little endian: the low word in the first four bytes, the high word in the next four
+  let lo = 0;
+  let hi = 0;
+  for (let k = n - 1; k >= 0; k--) {
+    if (k < WORD_BYTES) lo = lo * BYTE_VALUES + b[p + k];
+    else hi = hi * BYTE_VALUES + b[p + k];
+  }
+  if (size >= SIZES_PER_SIGN) {
+    // signed: the top word is read as two's complement
+    if (n > WORD_BYTES) hi |= 0;
+    else lo = (lo << (WORD_BITS - n * BYTE_BITS)) >> (WORD_BITS - n * BYTE_BITS);
+  }
+  return lo + hi * TWO_POW_32;
+}
 
 /**
  * Read an integer `number` at p (bounded by end): any integer spelling, never a float, magnitude below 2^53.
@@ -175,19 +199,7 @@ export function readInt(b: Uint8Array, p: number, end: number): number {
     if (size < 0 || size >= SIZED_INT_COUNT) throw refuse('reflection: not an integer');
     n = 1 << (size % SIZES_PER_SIGN);
     if (p + 1 + n > end) throw refuse('bad number');
-    // little endian: the low word in the first four bytes, the high word in the next four
-    let lo = 0;
-    let hi = 0;
-    for (let k = n - 1; k >= 0; k--) {
-      if (k < WORD_BYTES) lo = lo * BYTE_VALUES + b[p + 1 + k];
-      else hi = hi * BYTE_VALUES + b[p + 1 + k];
-    }
-    if (size >= SIZES_PER_SIGN) {
-      // signed: the top word is read as two's complement
-      if (n > WORD_BYTES) hi |= 0;
-      else lo = (lo << (WORD_BITS - n * BYTE_BITS)) >> (WORD_BITS - n * BYTE_BITS);
-    }
-    v = lo + hi * TWO_POW_32;
+    v = sizedInt(b, p + 1, size);
   }
   if (!(v > -INT_EXACT_MAX && v < INT_EXACT_MAX)) throw refuse('reflection: integer out of range');
   cursor.end = p + 1 + n;

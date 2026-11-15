@@ -10,13 +10,14 @@
  * at all, two array reads per lookup.
  *
  * @interacts none
- * @deps      arrays.ts (withRoom); the `@build` tags on a few methods are read by tools/build-web.mjs, see build.ts
+ * @deps      arrays.ts (withRoom), build.ts (MEASURE; the `@build` tags on a few methods, see build.ts)
  * @complexity get, set, intern: O(1) expected, O(length) for the byte hash and compare of intern; Rows.entry O(1)
  * @alloc     tables double when half full; the string pool's byte store doubles when full; Rows adds one row of
  *            `width` integers the first time an id is used
  */
 
 import { withRoom } from './arrays.ts';
+import { MEASURE } from './build.ts';
 
 /** Odd multipliers for mixing two keys into a table index (golden-ratio constants; any odd numbers would do). */
 const MIX_A = 0x9e3779b1;
@@ -141,11 +142,15 @@ export class PairMap {
  * Dense two-level table: one row of `width` entries per id, created the first time the id is used. Each entry
  * holds two integers for the caller: `ctx` (0 = not set yet, typically the base of a block of coder contexts) and
  * `aux` (free use, starts at 0). entry(id, k) returns the entry's index into both arrays.
+ *
+ * `aux` is kept in a build with MEASURE. Only switched-off tuning options of the codec read it (TUNING.ByteFlag,
+ * TUNING.TreeFlag), and a packaged build has those folded away. Turn one on and the build stops: the code would
+ * read a field nothing makes.
  */
 export class Rows {
   private rowOf: Int32Array;
   ctx: Int32Array;
-  aux: Int32Array;
+  declare aux: Int32Array;
   private used: number;
   private readonly width: number;
 
@@ -159,7 +164,7 @@ export class Rows {
     this.width = width;
     this.used = width; // entry 0 is never handed out, so a zero in rowOf means "no row yet"
     this.ctx = new Int32Array(width * CONFIG.RowsStart);
-    this.aux = new Int32Array(width * CONFIG.RowsStart);
+    if (MEASURE) this.aux = new Int32Array(width * CONFIG.RowsStart);
   }
 
   /** Index of entry (id, k), 0 <= k < width. @complexity O(1) @alloc a row on the id's first use */
@@ -170,7 +175,7 @@ export class Rows {
       this.used += this.width;
       if (this.used > this.ctx.length) {
         this.ctx = withRoom(this.ctx, this.used);
-        this.aux = withRoom(this.aux, this.used);
+        if (MEASURE) this.aux = withRoom(this.aux, this.used);
       }
       this.rowOf[id] = r;
     }

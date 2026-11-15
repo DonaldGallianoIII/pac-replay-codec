@@ -50,7 +50,8 @@ import {
 import {
   SWITCH_TO_STRUCTURE, TYPE_ID, OP_ADD, OP_DELETE, OP_CLEAR, OP_REVERSE, OP_DELETE_BY_REFID, OP_MASK, KIND_STRUCT,
   KIND_MAP, KIND_ARRAY, VAL_PRIM, VAL_REF, PRIM_STRING, PRIM_NUMBER, PRIM_BOOLEAN, PRIM_INT8, PRIM_UINT8, PRIM_INT16,
-  PRIM_UINT16, PRIM_FLOAT32, PRIM_WIDTH, bootSchema, parseReflection,
+  PRIM_UINT16, PRIM_FLOAT32, PRIM_WIDTH, SIZED_INT_FIRST, SIZED_INT_COUNT, SIZES_PER_SIGN, sizedInt, bootSchema,
+  parseReflection,
 } from './wire.ts';
 import type { Schema } from './wire.ts';
 import { RangeCoder, LAZY_BACKOFF, CORRUPT } from './range-coder.ts';
@@ -206,6 +207,10 @@ const REF_MAX = 1 << 24;
 const INDEX_MAX = 1 << 24;
 /** Integers of a `number` field beyond this are not modeled (their differences would not be exact doubles). */
 const NUM_INT_MAX = 1125899906842624;
+/** Smallest value a canonical unsigned integer of 1, 2, 4, 8 bytes holds: anything less has a shorter spelling. */
+const INT_UNSIGNED_MIN = [0x80, 0x100, 0x10000, 4294967296];
+/** A canonical signed integer of 1, 2, 4, 8 bytes is below minus this: anything from it up has a shorter spelling. */
+const INT_SIGNED_MIN = [0x20, 0x80, 0x8000, 2147483648];
 /** Longest string the walker models, in bytes. */
 const STR_MAX = 65535;
 /** Slots a collection of primitives remembers values for; items beyond share the last slot. */
@@ -1135,32 +1140,15 @@ export class Codec {
   // ---------------------------------------------------------------- Colyseus numbers
 
   /**
-   * Encode only: the validated integer `number` at the cursor.
+   * Encode only: the integer `number` at the cursor of a body the validator has passed. It is read by the
+   * validator's own reader (vInt), which accepts every integer the validator accepted.
    * @build encode
    */
   private num(): number {
-    const b = this.b;
-    const p = this.p;
-    const pre = b[p];
-    if (pre < 0x80) {
-      this.p = p + 1;
-      return pre;
-    }
-    if (pre >= 0xe0) {
-      this.p = p + 1;
-      return pre - 0x100;
-    }
-    switch (pre) {
-      case 0xcc: this.p = p + 2; return b[p + 1];
-      case 0xcd: this.p = p + 3; return b[p + 1] | (b[p + 2] << 8);
-      case 0xce: this.p = p + 5; return u32At(b, p + 1);
-      case 0xcf: this.p = p + 9; return u32At(b, p + 1) + u32At(b, p + 5) * TWO_POW_32;
-      case 0xd0: this.p = p + 2; return (b[p + 1] << 24) >> 24;
-      case 0xd1: this.p = p + 3; return ((b[p + 1] | (b[p + 2] << 8)) << 16) >> 16;
-      case 0xd2: this.p = p + 5; return u32At(b, p + 1) | 0;
-      case 0xd3: this.p = p + 9; return u32At(b, p + 1) + (u32At(b, p + 5) | 0) * TWO_POW_32;
-      default: throw new Error(INTERNAL);
-    }
+    this.vp = this.p;
+    const v = this.vInt();
+    this.p = this.vp;
+    return v;
   }
 
   /**
@@ -1634,7 +1622,9 @@ export class Codec {
   // ---------------------------------------------------------------- validation (encode only)
 
   /**
-   * A canonical integer `number` at vp. Returns it and advances, or NaN when it is anything else.
+   * A canonical integer `number` at vp, bounded by vend: one byte for -32 to 127, else a sized integer in the
+   * smallest size that holds it, magnitude up to NUM_INT_MAX. Returns it and advances, or NaN when it is anything
+   * else.
    * @build encode
    */
   private vInt(): number {
@@ -1651,59 +1641,15 @@ export class Codec {
       this.vp = p + 1;
       return pre - 0x100;
     }
-    let v: number;
-    switch (pre) {
-      case 0xcc:
-        if (p + 2 > end) return NaN;
-        v = b[p + 1];
-        if (v < 0x80) return NaN;
-        this.vp = p + 2;
-        return v;
-      case 0xcd:
-        if (p + 3 > end) return NaN;
-        v = b[p + 1] | (b[p + 2] << 8);
-        if (v < 0x100) return NaN;
-        this.vp = p + 3;
-        return v;
-      case 0xce:
-        if (p + 5 > end) return NaN;
-        v = u32At(b, p + 1);
-        if (v < 0x10000) return NaN;
-        this.vp = p + 5;
-        return v;
-      case 0xcf:
-        if (p + 9 > end) return NaN;
-        v = u32At(b, p + 1) + u32At(b, p + 5) * TWO_POW_32;
-        if (v < TWO_POW_32 || v > NUM_INT_MAX) return NaN;
-        this.vp = p + 9;
-        return v;
-      case 0xd0:
-        if (p + 2 > end) return NaN;
-        v = (b[p + 1] << 24) >> 24;
-        if (v >= -0x20) return NaN;
-        this.vp = p + 2;
-        return v;
-      case 0xd1:
-        if (p + 3 > end) return NaN;
-        v = ((b[p + 1] | (b[p + 2] << 8)) << 16) >> 16;
-        if (v >= -0x80) return NaN;
-        this.vp = p + 3;
-        return v;
-      case 0xd2:
-        if (p + 5 > end) return NaN;
-        v = u32At(b, p + 1) | 0;
-        if (v >= -0x8000) return NaN;
-        this.vp = p + 5;
-        return v;
-      case 0xd3:
-        if (p + 9 > end) return NaN;
-        v = u32At(b, p + 1) + (u32At(b, p + 5) | 0) * TWO_POW_32;
-        if (v >= -2147483648 || v < -NUM_INT_MAX) return NaN;
-        this.vp = p + 9;
-        return v;
-      default:
-        return NaN;
-    }
+    const size = pre - SIZED_INT_FIRST;
+    if (size < 0 || size >= SIZED_INT_COUNT) return NaN;
+    const n = 1 << (size % SIZES_PER_SIGN);
+    if (p + 1 + n > end) return NaN;
+    const v = sizedInt(b, p + 1, size);
+    // canonical: the value does not fit the next smaller spelling. NUM_INT_MAX only bounds the eight byte sizes.
+    if (size < SIZES_PER_SIGN ? v < INT_UNSIGNED_MIN[size] || v > NUM_INT_MAX : v >= -INT_SIGNED_MIN[size - SIZES_PER_SIGN] || v < -NUM_INT_MAX) return NaN;
+    this.vp = p + 1 + n;
+    return v;
   }
 
   /**
