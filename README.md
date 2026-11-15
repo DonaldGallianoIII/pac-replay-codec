@@ -239,7 +239,7 @@ by `test/make-synthetic.cjs` from Colyseus's own encoder (schema 4 and 5) with a
 
 ```sh
 npm install                                                  # once: the build tools, and 1.0.0 and 1.0.1 to test against
-node --test test/*.test.ts                                   # 54 tests (5 skip without real replays), about 30 s
+node --test test/*.test.ts                                   # 54 tests (5 skip without real replays), about a minute
 REPLAY_DIR=~/my-replays node --test test/*.test.ts           # plus 5 that run on your own .colreplay files
 node tools/corpus-check.mjs ~/my-replays                     # the whole folder, on every core
 ```
