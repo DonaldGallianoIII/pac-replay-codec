@@ -8,8 +8,10 @@
  *
  * Run: node --test test/build.test.ts
  *
- * @interacts tools/build-web.mjs (buildAll, in memory); reads web/lib/*.js; writes nothing
- * @deps      tools/build-web.mjs and its dev dependencies, node:test
+ * It also holds the packaged files to a size budget and to what each entry promises to export.
+ *
+ * @interacts tools/build-web.mjs (buildAll, in memory); reads and loads web/lib/*.js; writes nothing
+ * @deps      tools/build-web.mjs and its dev dependencies, node:zlib, node:test
  * @complexity one full build, O(S) over the size of src/ (about 280 KB), a few seconds
  * @alloc     the built files, in memory, for the length of the test
  */
@@ -17,6 +19,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const LIB = path.join(ROOT, 'web', 'lib');
@@ -52,4 +55,30 @@ test('the packaged files stand alone: no imports, and the license notice at the 
     assert.ok(code.slice(0, 600).includes('Sun Microsystems'), `web/lib/${name} keeps the fdlibm notice`);
     assert.ok(code.slice(0, 600).includes('GPL-3.0-only'), `web/lib/${name} names its license`);
   }
+});
+
+/**
+ * The size budget, in bytes after gzip -9: what each packaged file weighed when 1.1.0 was cut, plus about 1%.
+ * The files exist to be small. A change that grows one past its line has to raise the line here, in the same
+ * commit, and say why.
+ */
+const GZIP_BUDGET: Record<string, number> = { 'index.js': 22600, 'encode.js': 20450, 'decode.js': 15450 };
+const GZIP_LEVEL = 9;
+
+test('the packaged files stay inside their size budget', () => {
+  for (const [name, budget] of Object.entries(GZIP_BUDGET)) {
+    const size = zlib.gzipSync(fs.readFileSync(path.join(LIB, name)), { level: GZIP_LEVEL }).length;
+    assert.ok(size <= budget, `web/lib/${name} is ${size} bytes after gzip, over its budget of ${budget}`);
+  }
+  assert.deepEqual(fs.readdirSync(LIB).filter((n) => n.endsWith('.js')).sort(), Object.keys(GZIP_BUDGET).sort(), 'every packaged file has a budget');
+});
+
+test('each entry exports what it promises, and the unpack-only file has no packer', async () => {
+  const names = async (file: string): Promise<string[]> => Object.keys(await import(path.join(LIB, file))).sort();
+  assert.deepEqual(await names('decode.js'), ['unpackReplay']);
+  assert.deepEqual(await names('encode.js'), ['packReplay', 'unpackReplay']);
+  assert.deepEqual(await names('index.js'), [
+    'CONTAINER_MAGIC', 'EXPANSION_MAX', 'FORMAT_VERSION', 'MAX_ORIGINAL_BYTES', 'MODE_CODED', 'MODE_PRIOR', 'MODE_STORED',
+    'PREDICTORS_PAC_MINIGAME', 'PREDICTORS_SCHEMA', 'crc32', 'knowsGameVersion', 'packReplay', 'parsePrior', 'unpackReplay',
+  ]);
 });

@@ -86,3 +86,21 @@ port should pass.
 
 Any change that moves the sha256 values in the format lock (`test/codec.test.ts`, `test/prior.test.ts`) is a
 format change. It needs a new version byte, and the unpacker has to keep the old model to read old files.
+
+## One format, several builds
+
+The package ships three files built from the same source: `index.js` (packs, unpacks, starting models),
+`encode.js` (packs and unpacks) and `decode.js` (unpacks only). A build leaves code out; it never codes a bit
+differently. `src/build.ts` holds the switches and `tools/build-web.mjs` the build.
+
+Three checks hold that line, each on the source and on every packaged file:
+
+1. The format lock above.
+2. `test/compat.test.ts`: the packed bytes are those of the published 1.0.1, the published 1.0.0 and 1.0.1 read
+   them, this code reads theirs, and damaged or altered files get the same answer from both.
+3. `tools/corpus-check.mjs DIR`: check 2 over a folder of real replays.
+
+One thing a port must copy that the table above does not show: the type table reader looks a type name up in a
+plain table without asking whether the name is the table's own. A type named like a member every object has
+("constructor", "valueOf", "toString") therefore reads as primitive 0, not as an error. No real schema has such a
+name. Format 1 has always read them this way, so every build has to (`src/wire.ts`, `PRIM_IDS`).

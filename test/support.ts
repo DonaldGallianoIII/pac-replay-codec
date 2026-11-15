@@ -8,7 +8,7 @@
  *   web/lib/encode   the packaged entry that packs and unpacks, without starting models
  *   web/lib/decode   the packaged unpack-only entry
  * Published releases (RELEASES): pac-replay-codec 1.0.0 and 1.0.1 exactly as they sit on npm. They are dev
- * dependencies under alias names, pinned by integrity hash in package-lock.json, so `npm install` brings the very
+ * dependencies under alias names, pinned by integrity hash in package-lock.json, so `npm install` brings exactly the
  * bytes that were published. Without them the tests that need them skip and say so (NEEDS_RELEASES).
  *
  * @interacts reads test/fixtures/ and, when REPLAY_DIR is set, the .colreplay files in it; loads src/index.ts,

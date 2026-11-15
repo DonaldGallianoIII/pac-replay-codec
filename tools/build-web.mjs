@@ -1,6 +1,7 @@
 /**
  * Builds the packaged codec from src/ into web/lib/: one minified ES module per entry, no imports, with a source
- * map next to it. The command line tool, the npm package and the web page all run these files.
+ * map next to it (the maps stay out of git and out of the npm package). The command line tool, the npm package
+ * and the web page all run these files.
  *
  *   web/lib/index.js    the library entry: packs, unpacks, loads starting models
  *   web/lib/encode.js   packs and unpacks, no starting models (pac-replay-codec/encode), for a page that saves

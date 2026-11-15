@@ -48,7 +48,7 @@
   "sideEffects": false,
   "files": [
     "cli/",
-    "web/lib/",
+    "web/lib/*.js",
     "types/",
     "README.md",
     "FORMAT.md",

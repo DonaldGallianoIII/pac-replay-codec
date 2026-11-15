@@ -3,7 +3,7 @@
  * 1.0.0 and 1.0.1 and by the packaged files of this repository, and unpacked in both directions.
  *
  * For every .colreplay under the folder it checks, and fails the run on the first thing that does not hold:
- *   same bytes   web/lib/index.js and web/lib/encode.js pack to the very bytes 1.0.1 packs
+ *   same bytes   web/lib/index.js and web/lib/encode.js pack to exactly the bytes 1.0.1 packs
  *   new reads old   index.js, encode.js and decode.js unpack what 1.0.0 and 1.0.1 packed, to the original
  *   old reads new   1.0.0 and 1.0.1 unpack what this repository packs, to the original
  *

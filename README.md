@@ -118,8 +118,9 @@ the page is relative. The page and its code make no network requests, and the pa
 blocks connections from it. The policy is set in the page, so it covers the page; its background workers take
 their policy from the server, which is why the code itself never makes a request either.
 
-`web/lib/` is `src/` with the types stripped. After you change `src/`, run `node tools/build-web.mjs` to rebuild
-it (Node's own type stripper, nothing to install). A test fails if you forget.
+`web/lib/` holds the packaged codec: three minified files built from `src/`. After you change `src/`, run
+`npm install` once (the build tools are dev dependencies), then `node tools/build-web.mjs`. A test fails if you
+forget.
 
 ### The library
 
@@ -140,9 +141,44 @@ const original = unpackReplay(packed);            // throws if the packed bytes 
 container. `unpackReplay` checks the size and the crc32 of what it rebuilt. It returns the original or throws.
 It never returns something else.
 
-The npm package is plain JavaScript (`web/lib/`) with TypeScript types (`types/index.d.ts`). From a clone you
-can also import the TypeScript source,
-`./src/index.ts`, which Node 22.18 or newer runs directly.
+The npm package is minified JavaScript (`web/lib/`) with TypeScript types (`types/`). From a clone you can also
+import the TypeScript source, `./src/index.ts`, which Node 22.18 or newer runs directly, and
+`node tools/build-web.mjs` writes a source map beside each packaged file.
+
+### In a web app: three entries, load them when needed
+
+An app that only shows replays does not need the packer. The package has three entries, all the same codec and
+the same `.paczd` format:
+
+| Import | What it does | Minified | gzip | brotli |
+| --- | --- | ---: | ---: | ---: |
+| `pac-replay-codec/decode` | `unpackReplay` | 41,238 | 15,457 | 13,672 |
+| `pac-replay-codec/encode` | `packReplay`, and `unpackReplay` to check the pack | 54,887 | 20,345 | 17,914 |
+| `pac-replay-codec` | both, plus starting models (`parsePrior`) | 60,776 | 22,364 | 19,587 |
+
+Sizes are bytes after an app's bundler has taken the entry in (esbuild, bundle and minify, target ES2016).
+Version 1.0.1 had one entry: 89,105 bytes minified, 29,977 gzip, and 86,670 and 28,994 for an app that only
+called `unpackReplay`. `node tools/consumer-size.mjs` prints both sets.
+
+Load an entry when the user first needs it, so it stays out of the main bundle:
+
+```js
+// a replay viewer: fetch the unpacker on first use
+const { unpackReplay } = await import('pac-replay-codec/decode');
+const original = unpackReplay(packedBytes);
+
+// saving a replay packed: pack, then unpack and compare before the original is let go
+const { packReplay, unpackReplay } = await import('pac-replay-codec/encode');
+const packed = packReplay(originalBytes).bytes;
+const back = unpackReplay(packed);
+const exact = back.length === originalBytes.length && back.every((byte, i) => byte === originalBytes[i]);
+```
+
+That check is how the command line tool and the page use the codec: a pack counts only when it unpacks to the
+same bytes. `decode` and `encode` carry no starting-model loader (no model ships); the main entry does.
+
+The files are ES2016 with no imports and no top-level side effects (`"sideEffects": false`), so a bundler
+includes them as they are and adds no helpers.
 
 ### Command line and AI agents
 
@@ -202,12 +238,21 @@ The repository holds no recorded games. The tests run on two small synthetic rep
 by `test/make-synthetic.cjs` from Colyseus's own encoder (schema 4 and 5) with a made-up schema that is not a game.
 
 ```sh
-node --test test/*.test.ts                                   # 44 tests (3 skip without real replays), a few seconds
-REPLAY_DIR=~/my-replays node --test test/codec.test.ts       # plus 3 that run on your own .colreplay files
+npm install                                                  # once: the build tools, and 1.0.0 and 1.0.1 to test against
+node --test test/*.test.ts                                   # 54 tests (5 skip without real replays), about 30 s
+REPLAY_DIR=~/my-replays node --test test/*.test.ts           # plus 5 that run on your own .colreplay files
+node tools/corpus-check.mjs ~/my-replays                     # the whole folder, on every core
 ```
 
+Every test runs on the source and on the three packaged files.
+
 The format lock in `test/codec.test.ts` holds the sha256 of the packed fixtures. If a change moves it, the
-change is a format change (see [FORMAT.md](FORMAT.md)).
+change is a format change (see [FORMAT.md](FORMAT.md)). `test/compat.test.ts` holds every build against the
+published 1.0.0 and 1.0.1: same packed bytes, each reads what the other packed, the same damaged files refused.
+`tools/corpus-check.mjs` runs that check over a folder of real replays.
+
+`node tools/bench.mjs --replays ~/my-replays --cpu 3 pac-replay-codec-1.0.1 web/lib/index.js` times builds side
+by side. `node tools/size-report.mjs decode.js` lists where a packaged file's bytes come from.
 
 ## Credits and license
 

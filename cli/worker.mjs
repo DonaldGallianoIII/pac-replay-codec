@@ -9,7 +9,7 @@
  *             status: 'packed' | 'unpacked' | 'verified' | 'skipped' | 'failed'
  *
  * @interacts cli/pac-replay-codec.mjs (its only caller), the file system (reads `file`, writes `out` once)
- * @deps      web/lib/index.js (the codec as plain JavaScript), node:fs, node:path, node:worker_threads
+ * @deps      web/lib/index.js (the packaged codec), node:fs, node:path, node:worker_threads
  * @complexity O(F) per job, F = file size: pack, unpack and compare, or one unpack
  * @alloc     the file, its packed and its rebuilt copy (about 55 MB of coder tables while packing a 3.4 MB
  *            replay), released when the job is answered

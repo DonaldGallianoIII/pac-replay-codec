@@ -1,6 +1,6 @@
 /**
  * The unpack-only entry of the codec (pac-replay-codec/decode): for a page that shows replays and never packs
- * one. Built with the encoder left out (tools/build-web.mjs), so it is a little over half the size of the full
+ * one. Built with the encoder left out (tools/build-web.mjs), so it is about two thirds the size of the full
  * library.
  *
  *   unpackReplay(packed)  -> the original bytes, bit for bit, or an error when the packed data is damaged

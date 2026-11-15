@@ -1,6 +1,6 @@
 /**
  * Cross-check against the published releases. The .paczd format is frozen, so every build of this repository's
- * codec (the source, web/lib/index.js, web/lib/decode.js) is held against pac-replay-codec 1.0.0 and 1.0.1 exactly
+ * codec (the source and the three files in web/lib/) is held against pac-replay-codec 1.0.0 and 1.0.1 exactly
  * as they sit on npm (see support.ts for how they are pinned):
  *
  *   packs       byte for byte what 1.0.1 packs, with and without the mini-game formulas
