@@ -7,6 +7,8 @@
  *   reads old   what 1.0.0 and 1.0.1 packed comes back as the original
  *   old reads   1.0.0 and 1.0.1 unpack what this build packs
  *   damage      the same damaged files are refused and the same ones accepted, with the same bytes back
+ *   mutants     replays with a few bytes changed, or a type name swapped in the type table, pack to the same
+ *               bytes: the two builds agree on what they can walk and what they must keep as plain bytes
  *   model       a file 1.0.1 packed with a starting model: same bytes here, and it unpacks with that model
  *
  * Run: node --test test/compat.test.ts
@@ -16,10 +18,10 @@
  * @interacts support.ts (the builds, the releases, the fixtures); reads REPLAY_DIR when set; writes nothing
  * @deps      support.ts, src/prior.ts (writePrior, to make the hand-made starting model), node:test
  * @complexity fixtures: about 40 inputs of 20 KB, each packed and unpacked by every build and release, plus
- *            FuzzCases unpack calls per build. Real replays: R replays (REPLAY_LIMIT, default 20) of up to 5 MB,
+ *            FuzzCases unpack calls per build and Mutants pack and unpack calls per build. Real replays: R replays (REPLAY_LIMIT, default 20) of up to 5 MB,
  *            each packed once per packer and release and unpacked once per build and release, about 2.5 s each
  * @alloc     one replay with its packed and unpacked forms at a time
- * @rng       lcg(FuzzSeed) for the damaged files, the same ones on every run
+ * @rng       lcg(FuzzSeed) for the damaged files and lcg(MutantSeed) for the mutants, the same ones on every run
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,8 +33,24 @@ import {
 } from './support.ts';
 import type { Build, Lib } from './support.ts';
 import { writePrior } from '../src/prior.ts';
+import { firstHandshakeBody } from '../src/clrp.ts';
 
-const CONFIG = Object.freeze({ FuzzSeed: 20261114, FuzzCases: 1000, BodyMax: 2048, FlipsMax: 4, TimeoutMs: 600000 });
+const CONFIG = Object.freeze({
+  FuzzSeed: 20261114, FuzzCases: 1000, BodyMax: 2048, FlipsMax: 4, TimeoutMs: 600000,
+  /** Mutated replays packed by every build and by 1.0.1 (MUTANTS in the environment asks for more). */
+  MutantSeed: 20261115, Mutants: 300, MutantFlipsMax: 4, TypeTableShare: 3,
+});
+const MUTANTS = Number(process.env.MUTANTS ?? CONFIG.Mutants);
+/**
+ * Type names swapped inside a type table, same length so nothing else in the file moves. The right-hand names
+ * include members every object inherits ("valueOf"): format 1 reads such a name in its own way (wire.ts,
+ * PRIM_IDS), and every build has to read it that same way.
+ */
+const NAME_SWAPS: [string, string][] = [
+  ['float32', 'valueOf'], ['float32', 'float64'], ['boolean', 'valueOf'], ['uint16', 'string'], ['string', 'number'],
+  ['number', 'string'], ['uint8', 'int16'], ['map', 'set'], ['map', 'ref'], ['ref', 'map'], ['array', 'uint8'],
+  ['uint16', 'uint32'], ['int8', 'ref\0'], ['float32', 'toFixed'],
+];
 /** CLRZ header pieces, spelled out here so the test does not lean on the code under test. */
 const CLRZ = Object.freeze({ Magic: [0x43, 0x4c, 0x52, 0x5a], Version: 1, ModeCoded: 0, ModePrior: 2, ExpansionMax: 1024, VarintBase: 128 });
 const VERSIONS = ['6.11.2', '6.11', '7.0.0'];
@@ -138,6 +156,56 @@ test(`damage: ${CONFIG.FuzzCases} random, cut and flipped files get the same ans
   }
   // a flip in the coder's final padding leaves a file valid, so a few are accepted; that both sides agree is the test
   assert.ok(accepted < CONFIG.FuzzCases / 40, `${accepted} damaged files unpacked; only padding flips may`);
+});
+
+/** Every place `needle` occurs in b[from..to). */
+function occurrences(b: Uint8Array, needle: string, from: number, to: number): number[] {
+  const out: number[] = [];
+  for (let at = from; at + needle.length <= to; at++) {
+    let k = 0;
+    while (k < needle.length && b[at + k] === needle.charCodeAt(k)) k++;
+    if (k === needle.length) out.push(at);
+  }
+  return out;
+}
+
+test(`mutants: ${MUTANTS} changed copies of a replay pack to the bytes 1.0.1 packs, and unpack exact`, { skip: NEEDS, timeout: CONFIG.TimeoutMs }, () => {
+  const latest = LATEST_RELEASE as Build;
+  const rnd = lcg(CONFIG.MutantSeed);
+  let stored = 0;
+  for (let i = 0; i < MUTANTS; i++) {
+    const original = new Uint8Array(fs.readFileSync(SYNTHETIC[i % SYNTHETIC.length]));
+    const table = firstHandshakeBody(original) as [number, number];
+    const src = Uint8Array.from(original);
+    let what: string;
+    if (i % 4 === 0) {
+      // a type name in the type table becomes another name: one place, or every place
+      const [from, to] = NAME_SWAPS[rnd(NAME_SWAPS.length)];
+      const at = occurrences(src, from, table[0], table[1]);
+      const picked = at.length === 0 || rnd(2) === 0 ? at : [at[rnd(at.length)]];
+      for (const p of picked) for (let k = 0; k < to.length; k++) src[p + k] = to.charCodeAt(k);
+      what = `"${from}" to "${to}" in ${picked.length} places`;
+    } else {
+      // a few bytes changed: most often inside the type table, else anywhere in the file
+      const inTable = rnd(CONFIG.TypeTableShare + 1) !== 0;
+      const flips = 1 + rnd(CONFIG.MutantFlipsMax);
+      for (let k = 0; k < flips; k++) {
+        const at = inTable ? table[0] + rnd(table[1] - table[0]) : rnd(src.length);
+        src[at] ^= 1 + rnd(255);
+      }
+      what = `${flips} bytes changed ${inTable ? 'in the type table' : 'anywhere'}`;
+    }
+    const label = `mutant ${i} (${what})`;
+    const want = packer(latest)(src);
+    if (want.mode !== CLRZ.ModeCoded) stored++;
+    for (const b of PACKERS) {
+      const got = packer(b)(src);
+      assert.ok(same(got.bytes, want.bytes), `${label}: ${b.name} packs ${got.bytes.length} bytes, ${latest.name} packs ${want.bytes.length}, and they differ`);
+    }
+    for (const b of BUILDS) assert.ok(same(b.lib.unpackReplay(want.bytes), src), `${label}: ${b.name} unpacks it exact`);
+  }
+  // the mutants must still be replays the coder works on, or the test proves little
+  assert.ok(stored < MUTANTS / 4, `${stored} of ${MUTANTS} mutants were only stored`);
 });
 
 test('starting model: a file 1.0.1 packed with one packs to the same bytes here and unpacks with that model', { skip: NEEDS }, () => {

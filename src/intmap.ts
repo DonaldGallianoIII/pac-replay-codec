@@ -90,7 +90,7 @@ export class PairMap {
     t[at] = a;
     t[at + 1] = b;
     t[at + 2] = v;
-    if (++this.count * 2 > this.mask) this.grow();
+    if (++this.count * 2 > this.mask) this.growTable();
   }
 
   /**
@@ -120,7 +120,7 @@ export class PairMap {
     for (let at = 0; at < t.length; at += PAIR_STRIDE) if (t[at] !== ABSENT) fn(t[at], t[at + 1], t[at + 2]);
   }
 
-  private grow(): void {
+  private growTable(): void {
     const old = this.t;
     const cap = (this.mask + 1) * 2;
     this.t = new Int32Array(cap * PAIR_STRIDE).fill(ABSENT);
@@ -229,7 +229,7 @@ export class Recency {
   private lo: number;
   private hi: number;
   /** Number of items in the list. */
-  size: number;
+  held: number;
 
   /** @complexity O(RecencyStart) @alloc three small tables */
   constructor() {
@@ -239,7 +239,7 @@ export class Recency {
     this.slotOf = new Int32Array(CONFIG.RecencyStart);
     this.lo = (this.cap >> 1) + 1;
     this.hi = this.cap >> 1;
-    this.size = 0;
+    this.held = 0;
   }
 
   private add(slot: number, d: number): void {
@@ -251,10 +251,10 @@ export class Recency {
   private repack(): void {
     const old = this.itemAt;
     let cap = this.cap;
-    while (cap < this.size * 4 + 4) cap *= 2;
+    while (cap < this.held * 4 + 4) cap *= 2;
     const itemAt = new Int32Array(cap + 1);
     const tree = new Int32Array(cap + 1);
-    let slot = ((cap - this.size) >> 1) + 1;
+    let slot = ((cap - this.held) >> 1) + 1;
     this.lo = slot;
     for (let s = 1; s < old.length; s++) {
       const it = old[s];
@@ -298,7 +298,7 @@ export class Recency {
       if (from === this.hi) return;
       this.itemAt[from] = 0;
       this.add(from, -1);
-    } else this.size++;
+    } else this.held++;
     if (this.hi === this.cap) this.repack();
     this.place(item, ++this.hi);
   }
@@ -309,7 +309,7 @@ export class Recency {
    * @build prior
    */
   pushOldest(item: number): void {
-    this.size++;
+    this.held++;
     if (this.lo === 1) this.repack();
     this.place(item, --this.lo);
   }
@@ -324,14 +324,14 @@ export class Recency {
     const t = this.tree;
     let sum = 0;
     for (let i = this.slotOf[item]; i > 0; i -= i & -i) sum += t[i];
-    return this.size - sum;
+    return this.held - sum;
   }
 
   /** The item with `rank` more recent ones before it, or ABSENT when rank is not below size. @complexity O(log n) */
   itemAtRank(rank: number): number {
-    if (rank < 0 || rank >= this.size) return ABSENT;
+    if (rank < 0 || rank >= this.held) return ABSENT;
     // the slot whose prefix count is size - rank: descend the tree
-    let want = this.size - rank;
+    let want = this.held - rank;
     let pos = 0;
     const t = this.tree;
     let step = 1;
@@ -354,7 +354,7 @@ export class StringPool {
   private mask: number;
   /** Start of each string in `bytes`, by id; start[count] is the end of the last one. */
   start: Int32Array;
-  bytes: Uint8Array;
+  chars: Uint8Array;
   count: number;
 
   constructor() {
@@ -362,7 +362,7 @@ export class StringPool {
     this.hashes = new Int32Array(CONFIG.PoolStart);
     this.mask = CONFIG.PoolStart - 1;
     this.start = new Int32Array(CONFIG.PoolStart + 1);
-    this.bytes = new Uint8Array(CONFIG.PoolBytesStart);
+    this.chars = new Uint8Array(CONFIG.PoolBytesStart);
     this.count = 0;
   }
 
@@ -375,7 +375,7 @@ export class StringPool {
     for (let i = s; i < e; i++) h = Math.imul(h ^ b[i], FNV_PRIME);
     this.lastHash = h;
     const len = e - s;
-    const bytes = this.bytes;
+    const bytes = this.chars;
     let i = (h >>> 0) & this.mask;
     for (;;) {
       const id = this.table[i] - 1;
@@ -401,14 +401,14 @@ export class StringPool {
     const id = this.count;
     const len = e - s;
     const at = this.start[id];
-    if (at + len > this.bytes.length) {
-      let cap = this.bytes.length * 2;
+    if (at + len > this.chars.length) {
+      let cap = this.chars.length * 2;
       while (cap < at + len) cap *= 2;
       const nb = new Uint8Array(cap);
-      nb.set(this.bytes.subarray(0, at));
-      this.bytes = nb;
+      nb.set(this.chars.subarray(0, at));
+      this.chars = nb;
     }
-    for (let k = 0; k < len; k++) this.bytes[at + k] = b[s + k];
+    for (let k = 0; k < len; k++) this.chars[at + k] = b[s + k];
     if (id + 2 > this.start.length) {
       const ns = new Int32Array(this.start.length * 2);
       ns.set(this.start);

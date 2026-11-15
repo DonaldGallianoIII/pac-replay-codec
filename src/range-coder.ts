@@ -87,9 +87,9 @@ export class RangeCoder {
   // range, low and code hold unsigned 32 bit values as signed patterns
   private range: number;
   // low, out and outLen exist in a build that encodes
-  private low!: number;
-  private out!: Uint8Array;
-  outLen!: number;
+  private declare low: number;
+  private declare out: Uint8Array;
+  declare outLen: number;
   private readonly inp: Uint8Array;
   private ip: number;
   /** Bytes read past the end of the input (decode). */
@@ -97,19 +97,19 @@ export class RangeCoder {
   private code: number;
   // the next five exist in a build with MEASURE
   /** Optional bit accounting: cost in bits by role. Null in normal use. */
-  account!: Float64Array | null;
+  declare account: Float64Array | null;
   /** Optional decision counting by role (how many bit() calls). Null in normal use. */
-  decisions!: Float64Array | null;
-  /** Role the next bits are charged to when accounting is on (set through charge()). */
-  role!: number;
+  declare decisions: Float64Array | null;
+  /** Role the next bits are charged to when accounting is on. Callers set it behind MEASURE. */
+  declare role: number;
   /**
    * Optional observer, for the prior trainer: called with (context, bit, coded) for every modeled decision, where
    * coded is 1 when the bit was coded under that context and 0 when the context only learned from it. Only
    * honoured while accounting is on. Null in normal use.
    */
-  watch!: ((i: number, b: number, coded: number) => void) | null;
+  declare watch: ((i: number, b: number, coded: number) => void) | null;
   /** The backoff rule of this coder (LAZY_BACKOFF unless a measurement run changes it). */
-  lazy!: boolean;
+  declare lazy: boolean;
 
   /**
    * @param input packed bytes to decode, or null to encode
@@ -136,10 +136,10 @@ export class RangeCoder {
       this.watch = null;
       this.lazy = LAZY_BACKOFF;
     }
-    if (!(ENCODE && this.enc)) for (let i = 0; i < FLUSH_BYTES; i++) this.code = (this.code << BYTE_SHIFT) | this.next();
+    if (!(ENCODE && this.enc)) for (let i = 0; i < FLUSH_BYTES; i++) this.code = (this.code << BYTE_SHIFT) | this.nextByte();
   }
 
-  private next(): number {
+  private nextByte(): number {
     return this.ip < this.inp.length ? this.inp[this.ip++] : 0;
   }
 
@@ -521,12 +521,4 @@ export class RangeCoder {
     }
     return this.out.slice(0, this.outLen);
   }
-}
-
-/**
- * Charge the bits coded from here on to `role`, for the bit accounting. A build without MEASURE drops the call.
- * @complexity O(1) @alloc none
- */
-export function charge(rc: RangeCoder, role: number): void {
-  if (MEASURE) rc.role = role;
 }

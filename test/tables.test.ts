@@ -53,7 +53,7 @@ test('Recency gives the ranks of a move-to-front list', () => {
       naive.splice(at, 1);
       naive.unshift(item);
     }
-    assert.equal(r.size, naive.length);
+    assert.equal(r.held, naive.length);
     if (op % 500 === 0) {
       for (let k = 0; k < naive.length; k++) {
         assert.equal(r.itemAtRank(k), naive[k]);
@@ -118,7 +118,7 @@ test('StringPool: one id per distinct byte string, the empty string included', (
   }
   assert.ok(seen.includes(''));
   const dec = new TextDecoder();
-  for (let id = 0; id < seen.length; id++) assert.equal(dec.decode(pool.bytes.subarray(pool.start[id], pool.start[id + 1])), seen[id]);
+  for (let id = 0; id < seen.length; id++) assert.equal(dec.decode(pool.chars.subarray(pool.start[id], pool.start[id + 1])), seen[id]);
 });
 
 test('the coder: whole-symbol loops write the same bytes as one bit at a time, and decode back', () => {

@@ -104,7 +104,7 @@ test('a 6.11.x replay takes the formulas in one pass, and gameAware: false takes
 test('the formulas throwing on an unknown version falls back to the schema set; on 6.11.x the file is stored as before', () => {
   const real = Codec.prototype.encode;
   Codec.prototype.encode = function (this: Codec) {
-    if (Reflect.get(this, 'gameAware') === true) throw new Error('formula pass failed (test)');
+    if (Reflect.get(this, 'formulas') === true) throw new Error('formula pass failed (test)');
     return real.call(this);
   };
   try {

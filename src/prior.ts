@@ -52,7 +52,7 @@ const VARINT_LIMIT = 4294967296;
 const DAMAGED = 'starting model file is damaged';
 
 /** Who owns a string field (how the codec finds it again when the prior is loaded). */
-export const OWNER = Object.freeze({
+export const OWNER = {
   /** The message type names (field 0). */
   MSGTYPE: 0,
   /** A string field of a structure, or the string items of a collection: key is the field id. */
@@ -60,31 +60,31 @@ export const OWNER = Object.freeze({
   /** The keys of a map: key is the collection id. */
   KEY: 2,
   COUNT: 3,
-});
+} as const;
 
 /**
  * The context blocks a prior may create, by where the codec keeps them. The numbers are part of the prior file.
  * `keys` is how many of (a, b, c) the site uses.
  */
-export const SITE = Object.freeze({
+export const SITE = {
   HEAD_FLAG_START: 1, HEAD_FLAG: 2, HEAD_TREE: 3, HEAD_MISS: 4, COLL: 5, INDEX: 6, SWITCH: 7, TREE_STOP: 8,
   TREE_STEP: 9, NEW_REF: 10, TYPE: 11, TYPE_LO: 12, BYTE: 13, BYTE_HI: 14, INT16: 15, INT16_HI: 16, NUM_CLASS: 17,
   NUM_HI: 18, NUM_LO: 19, FLOAT_LO: 20, FLOAT_HI: 21, OTHER: 22, STR_HINT: 23, COUNT: 24,
-});
+} as const;
 /** Keys per site, indexed by site code (0 is unused). */
-export const SITE_KEYS = Object.freeze([0, 1, 1, 1, 2, 1, 1, 1, 1, 2, 1, 1, 2, 2, 3, 2, 3, 1, 2, 1, 2, 2, 1, 2]);
+export const SITE_KEYS: readonly number[] = [0, 1, 1, 1, 2, 1, 1, 1, 1, 2, 1, 1, 2, 2, 3, 2, 3, 1, 2, 1, 2, 2, 1, 2];
 
 /** Probability that the bit is 1, out of 65536, for state levels 0 to 31; level 63 - k is 65536 minus level k. */
-export const PROB_LEVELS = Object.freeze([
+export const PROB_LEVELS: readonly number[] = [
   33, 42, 53, 68, 86, 109, 139, 177, 225, 286, 364, 462, 588, 746, 947, 1200, 1520, 1923, 2429, 3060, 3847, 4819,
   6013, 7468, 9219, 11301, 13738, 16541, 19699, 23174, 26902, 30794,
-]);
+];
 const PROB_CODES = 64;
 const PROB_CODE_MASK = 63;
 const PROB_CODE_BITS = 6;
 const PROB_ONE = 65536;
 /** Starting observation counts a state may carry (the coder's own limit is 30). */
-export const COUNT_LEVELS = Object.freeze([2, 6, 14, 30]);
+export const COUNT_LEVELS: readonly number[] = [2, 6, 14, 30];
 const PROB_SHIFT = 16;
 /** The coder stores a state XOR this (range-coder.ts). */
 const STATE_FLIP = 0x80000000;

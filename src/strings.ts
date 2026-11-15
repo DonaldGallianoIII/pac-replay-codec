@@ -19,11 +19,11 @@
  * (preloadPool, preloadField). From then on a preloaded string is coded like one the file itself brought in.
  *
  * @interacts range-coder.ts through symbols.ts; intmap.ts (the pool and one sparse context map)
- * @deps      symbols.ts, intmap.ts, range-coder.ts (charge), build.ts (the flags; `@build` tags, see build.ts)
+ * @deps      symbols.ts, intmap.ts, range-coder.ts, build.ts (the flags; `@build` tags, see build.ts)
  * @complexity O(log n) per string for its recency rank (n distinct values of the field), O(length) for the pool
  * @alloc     per distinct string per field: a few integers. Nothing per coded string.
  */
-import { RangeCoder, charge } from './range-coder.ts';
+import { RangeCoder } from './range-coder.ts';
 import { tree2, gamma, gammaSlots, GAMMA_BITS_NARROW } from './symbols.ts';
 import { PairMap, StringPool, Recency, ABSENT } from './intmap.ts';
 import { ENCODE, MEASURE } from './build.ts';
@@ -118,7 +118,7 @@ export class StringModel {
   private idxOf: Int32Array[]; // pool id -> index + 1, 0 = not in the field
   private idOf: Int32Array[]; // index -> pool id
   private mtf: (Recency | null)[]; // large fields: their values by last use
-  private next: Int32Array; // small fields: per hint, the index + 1 that followed it last time
+  private follows: Int32Array; // small fields: per hint, the index + 1 that followed it last time
   private ctx: Int32Array; // first context of the field's run of FIELD_CONTEXTS (the CTX_ offsets)
   private smallHi: Int32Array; // (field, hint) -> context base, 0 = not yet allocated
   /** Every pool string by last time it was new to a field. */
@@ -127,10 +127,10 @@ export class StringModel {
   private readonly litLo: number;
   private readonly scratch: Uint8Array;
   /** Index (in its field) of the string just coded, for the caller's slot memory. */
-  lastIndex: number;
+  codedIndex: number;
   /** Literal strings coded and their bytes, for the report. Kept in a build with MEASURE. */
-  literals!: number;
-  literalBytes!: number;
+  declare literals: number;
+  declare literalBytes: number;
 
   constructor(rc: RangeCoder) {
     this.rc = rc;
@@ -142,14 +142,14 @@ export class StringModel {
     this.idxOf = [];
     this.idOf = [];
     this.mtf = [];
-    this.next = new Int32Array(n * HINT_COLS);
+    this.follows = new Int32Array(n * HINT_COLS);
     this.ctx = new Int32Array(n);
     this.smallHi = new Int32Array(n * HINT_COLS);
     this.gmtf = new Recency();
     this.litHi = new PairMap();
     this.litLo = rc.alloc(BYTE_SLOTS * BYTE_SLOTS);
     this.scratch = new Uint8Array(1 << 16);
-    this.lastIndex = -1;
+    this.codedIndex = -1;
     if (MEASURE) {
       this.literals = 0;
       this.literalBytes = 0;
@@ -181,7 +181,7 @@ export class StringModel {
     const large = new Uint8Array(cap);
     large.set(this.large);
     this.large = large;
-    this.next = i32(this.next, HINT_COLS);
+    this.follows = i32(this.follows, HINT_COLS);
     this.ctx = i32(this.ctx, 1);
     this.smallHi = i32(this.smallHi, HINT_COLS);
   }
@@ -312,7 +312,7 @@ export class StringModel {
   /**
    * Code one string of field f.
    * Encoding: `id` is the string's pool id, or ABSENT with its bytes at b[s..e). Decoding: pass ABSENT.
-   * Returns the pool id; this.lastIndex is its index in the field.
+   * Returns the pool id; this.codedIndex is its index in the field.
    * @param hint small non-negative context hint (0 = none), clamped to HINT_MAX
    * @param tplIdx index (in this field) of the string a look-alike structure had here, or -1
    * @param role base role for bit accounting
@@ -321,7 +321,7 @@ export class StringModel {
   code(f: number, id: number, b: Uint8Array, s: number, e: number, hint: number, tplIdx: number, role: number): number {
     const rc = this.rc;
     const enc = ENCODE && rc.enc;
-    charge(rc, role + ROLE_SYM);
+    if (MEASURE) rc.role = role + ROLE_SYM;
     const cnt = this.count[f];
     const ctx = this.ctx[f];
     let idx = -1;
@@ -332,14 +332,14 @@ export class StringModel {
     if (tplIdx >= 0 && tplIdx < cnt) {
       if (rc.bit(ctx + CTX_TPL, idx === tplIdx ? 1 : 0) !== 0) {
         if (this.large[f] !== 0) (this.mtf[f] as Recency).touch(tplIdx);
-        this.lastIndex = tplIdx;
+        this.codedIndex = tplIdx;
         return this.idOf[f][tplIdx];
       }
     }
     if (this.large[f] === 0) {
       const h = hint > HINT_MAX ? HINT_MAX : hint;
       const nk = f * HINT_COLS + h;
-      const pred = this.next[nk];
+      const pred = this.follows[nk];
       let hit = 0;
       if (pred !== 0) hit = rc.bit(ctx + CTX_NEXT + h, idx + 1 === pred ? 1 : 0);
       if (hit !== 0) idx = pred - 1;
@@ -353,8 +353,8 @@ export class StringModel {
           idx = this.append(f, id);
         }
       }
-      this.next[nk] = idx + 1;
-      this.lastIndex = idx;
+      this.follows[nk] = idx + 1;
+      this.codedIndex = idx;
       return this.idOf[f][idx];
     }
     // large field: recency rank, most recent = 0
@@ -370,7 +370,7 @@ export class StringModel {
       id = this.codeNew(f, id, b, s, e, role);
       idx = this.append(f, id);
     }
-    this.lastIndex = idx;
+    this.codedIndex = idx;
     return this.idOf[f][idx];
   }
 
@@ -379,7 +379,7 @@ export class StringModel {
     const rc = this.rc;
     const enc = ENCODE && rc.enc;
     const ctx = this.ctx[f];
-    charge(rc, role + ROLE_GLOBAL);
+    if (MEASURE) rc.role = role + ROLE_GLOBAL;
     const known = rc.bit(ctx + CTX_IN_POOL, id !== ABSENT ? 1 : 0);
     if (known !== 0) {
       const g = this.gmtf;
@@ -390,7 +390,7 @@ export class StringModel {
       g.touch(id);
       return id;
     }
-    charge(rc, role + ROLE_LITERAL);
+    if (MEASURE) rc.role = role + ROLE_LITERAL;
     const lit = this.scratch;
     let n: number;
     const uuid = rc.bit(ctx + CTX_UUID, enc && isUuid(b, s, e) ? 1 : 0);

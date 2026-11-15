@@ -11,14 +11,23 @@
  *   2. bundle   esbuild joins the modules into one file and lowers the syntax to CONFIG.Target.
  *   3. cut      a method whose doc block says `@build encode` (or measure, prior) is left out of a build that
  *               lacks that capability. Methods are the one thing a minifier cannot drop on its own.
- *   4. minify   terser folds the constants, drops what is now unreachable, and renames everything that does not
- *               cross the package boundary (CONFIG.PublicNames lists what does).
- *   5. checks   nothing that is left may still refer to a method that was cut, and the output must parse as
- *               CONFIG.EcmaVersion. Either failing stops the build.
+ *   4. minify   terser folds the constants, drops what is now unreachable, and renames every variable and every
+ *               property of our own. Two lists say what is not ours to rename: CONFIG.PublicNames (what crosses
+ *               the package boundary) and CONFIG.BuiltinNames (members of JavaScript's own objects).
+ *   5. checks   on the minified code before renaming, where names are still the source's:
+ *               a. nothing may still refer to a method that was cut;
+ *               b. a property the code reads but never defines must be on one of the two lists (it can only
+ *                  come from outside);
+ *               c. a property the code defines that is also the name of a JavaScript built-in member must be on
+ *                  a list too, so a call on a typed array can never be renamed along with ours;
+ *               d. the code names no host object (window, process, console ...): the codec is pure.
+ *               And the final output must parse as CONFIG.EcmaVersion. Any of them failing stops the build.
  * The same source, with every flag on, runs unbuilt under Node for the tests.
  *
- * Usage: node tools/build-web.mjs            write web/lib/
- *        node tools/build-web.mjs --sizes    also print raw, gzip and brotli sizes
+ * Usage: node tools/build-web.mjs               write web/lib/
+ *        node tools/build-web.mjs --sizes       also print raw, gzip and brotli sizes
+ *        node tools/build-web.mjs --plain DIR   also write DIR/<file>.plain.js: minified but not renamed, to read
+ *                                               what a build kept
  *
  * @interacts src/*.ts (read), package.json (name and version for the banner), web/lib/ (replaced on every run)
  * @deps      esbuild, terser, acorn (dev dependencies, pinned to exact versions so the output is reproducible),
@@ -64,7 +73,69 @@ export const CONFIG = Object.freeze({
     'frames', 'rawFrames', 'rawBytes', 'tokens', 'switches', 'steps',
     'id', 'model', 'contexts',
   ],
+  /**
+   * Members of JavaScript's own objects that the code uses, never renamed. The checks keep this list honest: the
+   * build stops when the code reads a member that is on no list and that it never defines, or defines one that
+   * shares a name with a built-in.
+   */
+  BuiltinNames: [
+    // names the language itself looks up on an object, whoever defined them
+    'constructor', '__proto__', 'valueOf', 'toJSON', 'then',
+    // every array and typed array
+    'length', 'set', 'fill', 'subarray', 'slice', 'buffer', 'byteOffset', 'push', 'concat', 'indexOf', 'from',
+    // Math
+    'floor', 'abs', 'sqrt', 'imul', 'clz32', 'fround', 'log2',
+    // Object, Function, String, Number, Error
+    'prototype', 'hasOwnProperty', 'call', 'keys', 'charCodeAt', 'fromCharCode', 'toString', 'padStart', 'message',
+    // Map (the type table reader keeps structures by refId)
+    'get', 'has',
+    // DataView (reading a float's bytes)
+    'getUint32', 'getInt32', 'getInt16', 'getInt8', 'getFloat32', 'getFloat64', 'setUint8',
+    // names of ours that are also built-in members; they stay as they are
+    'add', 'clear', 'find', 'raw', 'value', 'name',
+  ],
+  /** Host objects the codec must never name: it does no I/O and runs anywhere JavaScript does. */
+  HostNames: [
+    'globalThis', 'window', 'self', 'document', 'navigator', 'process', 'require', 'module', 'console', 'performance',
+    'Buffer', 'TextEncoder', 'TextDecoder', 'fetch', 'crypto', 'setTimeout', 'setInterval', 'queueMicrotask', 'URL',
+    'Worker', 'postMessage', 'localStorage', 'eval', 'Function',
+  ],
 });
+
+/**
+ * Every member name of JavaScript's standard objects, read from the engine running the build. Used by check c
+ * only, never to decide a rename, so the output does not depend on the Node version.
+ * @complexity O(built-ins), a few thousand names @alloc one set
+ */
+function standardMemberNames() {
+  const STANDARD = [
+    'Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'Symbol', 'BigInt', 'Math', 'JSON', 'Reflect', 'Atomics',
+    'Map', 'Set', 'WeakMap', 'WeakSet', 'WeakRef', 'Promise', 'Proxy', 'RegExp', 'Date', 'Error', 'RangeError', 'TypeError',
+    'ArrayBuffer', 'SharedArrayBuffer', 'DataView', 'Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array',
+    'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array',
+    'Iterator',
+  ];
+  // members that live on instances or on engine-made objects, not on a prototype
+  const names = new Set([
+    'stack', 'cause', 'lastIndex', 'index', 'input', 'groups', 'done', 'value', 'raw', 'callee', 'caller', 'arguments',
+    // the keys of a property descriptor
+    'writable', 'enumerable', 'configurable', 'get', 'set',
+  ]);
+  const take = (o) => {
+    for (let at = o; at !== null && at !== undefined; at = Object.getPrototypeOf(at)) {
+      for (const n of Object.getOwnPropertyNames(at)) names.add(n);
+    }
+  };
+  for (const g of STANDARD) {
+    const o = globalThis[g];
+    if (o === undefined) continue;
+    take(o);
+    if (o.prototype) take(o.prototype);
+  }
+  take(Object.getPrototypeOf([][Symbol.iterator]()));
+  take(Object.getPrototypeOf(new Map().entries()));
+  return names;
+}
 
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 /** Kept at the top of every packaged file: the license, and the fdlibm notice src/trig.ts must carry. */
@@ -221,32 +292,58 @@ function terserOptions(rename, map) {
       // the public calls return real booleans
       booleans_as_integers: false,
     },
-    mangle: rename ? { module: true, toplevel: true, properties: { reserved: CONFIG.PublicNames, keep_quoted: true } } : false,
+    // builtins: true lets terser rename names it would otherwise spare for being some browser API's; the two
+    // lists and the checks are what make that safe here
+    mangle: rename ? { module: true, toplevel: true, properties: { builtins: true, reserved: [...CONFIG.PublicNames, ...CONFIG.BuiltinNames], keep_quoted: true } } : false,
     format: { ecma: CONFIG.EcmaVersion, comments: false, preamble: rename ? BANNER : undefined },
     sourceMap: map === null ? false : { content: map, asObject: true, includeSources: false },
   };
 }
 
 /**
- * Step 5, first half: after dead code is gone, no property anywhere may carry the name of a method that was cut.
- * Read from a minified but unrenamed copy, where names are still the source's.
- * @complexity O(bundle) @alloc one syntax tree
+ * Step 5, checks a to d, on the minified code before renaming (dead code is gone, names are still the source's).
+ * @returns {Promise<string>} that unrenamed code, for --plain
+ * @complexity O(bundle) @alloc one syntax tree and three sets of names
  */
-async function checkNoReference(code, cut, out) {
-  if (cut.length === 0) return;
+async function checkNames(code, cut, out) {
   const plain = await minify(code, terserOptions(false, null));
-  const names = new Set(cut);
-  const hits = new Set();
+  const cutNames = new Set(cut);
+  const reserved = new Set([...CONFIG.PublicNames, ...CONFIG.BuiltinNames]);
+  const hosts = new Set(CONFIG.HostNames);
+  const used = new Set(); // read as obj.name somewhere
+  const defined = new Set(); // made by the code: a method, an object literal key, or the target of obj.name = ...
+  const stillCut = new Set();
+  const hostHits = new Set();
+  const keyName = (k) => (k.type === 'Identifier' ? k.name : String(k.value));
   walk(parse(plain.code, { ecmaVersion: 'latest', sourceType: 'module' }), (n) => {
-    if (n.type === 'MemberExpression' && !n.computed && names.has(n.property.name)) hits.add(n.property.name);
-    else if ((n.type === 'MethodDefinition' || n.type === 'Property') && !n.computed && names.has(n.key.name)) hits.add(n.key.name);
+    if (n.type === 'MemberExpression' && !n.computed) {
+      used.add(n.property.name);
+      if (cutNames.has(n.property.name)) stillCut.add(n.property.name);
+      if (n.object.type === 'Identifier' && hosts.has(n.object.name)) hostHits.add(n.object.name);
+    } else if ((n.type === 'MethodDefinition' || n.type === 'Property') && !n.computed) {
+      defined.add(keyName(n.key));
+      if (cutNames.has(keyName(n.key))) stillCut.add(keyName(n.key));
+    } else if (n.type === 'AssignmentExpression' && n.left.type === 'MemberExpression' && !n.left.computed) {
+      defined.add(n.left.property.name);
+    } else if ((n.type === 'CallExpression' || n.type === 'NewExpression') && n.callee.type === 'Identifier' && hosts.has(n.callee.name)) {
+      hostHits.add(n.callee.name);
+    }
   });
-  if (hits.size > 0) throw new Error(`${out}: still refers to methods that were cut from this build: ${[...hits].sort().join(', ')}`);
+  const fail = (what, names) => {
+    if (names.length > 0) throw new Error(`${out}: ${what}: ${names.sort().join(', ')}`);
+  };
+  fail('still refers to methods that were cut from this build', [...stillCut]);
+  fail('reads properties it never defines and that are on neither list (CONFIG.PublicNames, CONFIG.BuiltinNames)', [...used].filter((n) => !defined.has(n) && !reserved.has(n)));
+  const standard = standardMemberNames();
+  fail('defines properties named like a JavaScript built-in member; rename them or add them to CONFIG.BuiltinNames', [...defined].filter((n) => standard.has(n) && !reserved.has(n)));
+  fail('names a host object; the codec must stay pure', [...hostHits]);
+  return plain.code;
 }
 
 /**
  * Build every entry of CONFIG.Builds in memory.
- * @returns {Promise<{ out: string, code: string, map: string }[]>}
+ * @returns {Promise<{ out: string, code: string, map: string, plain: string }[]>} plain is the minified code
+ *          before renaming, for reading what the build kept
  * @complexity O(S) per build @alloc the outputs
  */
 export async function buildAll() {
@@ -255,11 +352,11 @@ export async function buildAll() {
   for (const { out, entry, flags } of CONFIG.Builds) {
     const joined = await bundle(entry, flags, out);
     const { code, cut } = cutMethods(joined.code, flags, tags);
-    await checkNoReference(code, cut, out);
+    const plain = await checkNames(code, cut, out);
     const small = await minify(code, terserOptions(true, joined.map));
-    // step 5, second half: the output is ES2016 and nothing newer
+    // the last check: the output is ES2016 and nothing newer
     parse(small.code, { ecmaVersion: CONFIG.EcmaVersion, sourceType: 'module' });
-    outputs.push({ out, code: `${small.code}\n`, map: JSON.stringify(small.map) });
+    outputs.push({ out, code: `${small.code}\n`, map: JSON.stringify(small.map), plain });
   }
   return outputs;
 }
@@ -278,9 +375,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const outputs = await buildAll();
   rmSync(OUT, { recursive: true, force: true });
   mkdirSync(OUT, { recursive: true });
-  for (const { out, code, map } of outputs) {
+  const plainAt = process.argv.indexOf('--plain');
+  for (const { out, code, map, plain } of outputs) {
     writeFileSync(join(OUT, out), code);
     writeFileSync(join(OUT, `${out}.map`), map);
+    if (plainAt >= 0) writeFileSync(join(process.argv[plainAt + 1], `${out.replace(/\.js$/, '')}.plain.js`), plain);
     if (process.argv.includes('--sizes')) {
       const s = sizes(code);
       console.log(`web/lib/${out.padEnd(10)} ${String(s.raw).padStart(6)} bytes   gzip ${String(s.gzip).padStart(6)}   brotli ${String(s.brotli).padStart(6)}`);

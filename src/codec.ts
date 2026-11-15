@@ -52,7 +52,7 @@ import {
   KIND_MAP, KIND_ARRAY, VAL_PRIM, VAL_REF, PRIM_STRING, PRIM_NUMBER, PRIM_BOOLEAN, PRIM_INT8, PRIM_UINT8, PRIM_INT16,
   PRIM_UINT16, PRIM_FLOAT32, PRIM_WIDTH, Schema, bootSchema, parseReflection,
 } from './wire.ts';
-import { RangeCoder, charge, LAZY_BACKOFF } from './range-coder.ts';
+import { RangeCoder, LAZY_BACKOFF } from './range-coder.ts';
 import {
   tree, tree2, gamma1, gamma2, gammaSlots, sizeClass, zigzag, unzigzag, GAMMA_BITS_WIDE, GAMMA_BITS_NARROW,
   BACKOFF_MIN_COUNT,
@@ -515,11 +515,11 @@ export class Codec {
   readonly rc: RangeCoder;
   readonly strings: StringModel;
   /** The counters of a packing run. Kept in a build with ENCODE. */
-  readonly stats!: CodecStats;
+  declare readonly stats: CodecStats;
   private readonly enc: boolean;
-  private readonly gameAware: boolean;
+  private readonly formulas: boolean;
   /** Body of the handshake frame the starting model knows (empty: none). Kept in a build with PRIOR. */
-  private readonly knownHandshake!: Uint8Array;
+  private declare readonly knownHandshake: Uint8Array;
   // bytes: the source file (encode) or the frame being built (decode)
   private b: Uint8Array;
   private p = 0;
@@ -528,23 +528,23 @@ export class Codec {
   private readonly limit: number;
   // The fields from here to the validator cursor belong to packing: they are set up in the constructor, in a
   // build with ENCODE. `end` is where the body being walked ends in the source file.
-  private end!: number;
+  private declare end: number;
   // frame being read
-  private fKind!: number;
-  private fDt!: number;
-  private fOffset!: number;
-  private fLen!: number;
-  private fPayload!: number;
-  private fEnd!: number;
-  private fTypeTag!: number;
-  private fTypeNum!: number;
-  private fTypeStart!: number;
-  private fTypeLen!: number;
-  private fEnc!: number;
-  private vEnd!: number;
+  private declare fKind: number;
+  private declare fDt: number;
+  private declare fOffset: number;
+  private declare fLen: number;
+  private declare fPayload: number;
+  private declare fEnd: number;
+  private declare fTypeTag: number;
+  private declare fTypeNum: number;
+  private declare fTypeStart: number;
+  private declare fTypeLen: number;
+  private declare fEnc: number;
+  private declare vEnd: number;
   // validator cursor
-  private vp!: number;
-  private vend!: number;
+  private declare vp: number;
+  private declare vend: number;
   // static contexts
   private readonly cKind: number;
   private readonly cDtHi: number;
@@ -564,7 +564,7 @@ export class Codec {
   private schema: Schema | null = null;
   private tGroup = new Int32Array(0);
   private gameGroup = new Int32Array(BYTE_VALUES);
-  private groups = BOOT_GROUPS;
+  private groupsUsed = BOOT_GROUPS;
   // game-aware types of the current schema
   private tCar = new Float64Array(0);
   private tCarIx = new Int32Array(0);
@@ -584,10 +584,10 @@ export class Codec {
   private handleOf = new Int32Array(CONFIG.RefsStart).fill(-1);
   private pendFlag = new Uint8Array(CONFIG.RefsStart);
   // the validator's notes on structures announced in the frame it is checking (a build with ENCODE)
-  private ovStamp!: Int32Array;
-  private ovKind!: Uint8Array;
-  private ovType!: Int32Array;
-  private stamp!: number;
+  private declare ovStamp: Int32Array;
+  private declare ovKind: Uint8Array;
+  private declare ovType: Int32Array;
+  private declare stamp: number;
   private pending = new Int32Array(CONFIG.HandlesStart);
   private pendingLen = 0;
   private pendingHead = 0;
@@ -714,8 +714,8 @@ export class Codec {
   private floatFrame = 0;
   private exactStep = 0;
   // what measureStep found for the frame about to be coded (a build with ENCODE)
-  private stepRatioQ!: number;
-  private stepExactQ!: number;
+  private declare stepRatioQ: number;
+  private declare stepExactQ: number;
   private lastExactFrame = LAST_EXACT_NEVER;
   // mini-game
   private mgT = -1;
@@ -725,14 +725,14 @@ export class Codec {
   private carBorn = -1;
   private carCount = 0;
   /** Whole-range clock searches made for the current carousel (a build with ENCODE). */
-  private carFull!: number;
+  private declare carFull: number;
   private portalOf = new Int32Array(BYTE_VALUES);
   // encoder look-ahead: the floats of the frame being validated (a build with ENCODE)
-  private ftH!: Int32Array;
-  private ftI!: Int32Array;
-  private ftV!: Float64Array;
-  private ftN!: number;
-  private readings!: Float64Array;
+  private declare ftH: Int32Array;
+  private declare ftI: Int32Array;
+  private declare ftV: Float64Array;
+  private declare ftN: number;
+  private declare readings: Float64Array;
   // messages
   private readonly msgTypes: number;
   private readonly pathMap = new PairMap();
@@ -757,7 +757,7 @@ export class Codec {
   constructor(input: Uint8Array, encode: boolean, opts: CodecOptions) {
     const enc = ENCODE && encode;
     this.enc = enc;
-    this.gameAware = opts.gameAware;
+    this.formulas = opts.gameAware;
     const rc = new RangeCoder(enc ? null : input);
     this.rc = rc;
     if (MEASURE) {
@@ -1078,9 +1078,9 @@ export class Codec {
   }
 
   /** `n` bytes as literal data, each in the context of the byte before it. */
-  private rawBytes(n: number, role: number, space: number): void {
+  private byteRun(n: number, role: number, space: number): void {
     const rc = this.rc;
-    charge(rc, role);
+    if (MEASURE) rc.role = role;
     const base = this.ctx(this.rawBase, space, RAW_SPACE_SIZE);
     let prev = 0;
     if (ENCODE && this.enc) {
@@ -1217,7 +1217,7 @@ export class Codec {
     if (len < 0x20) b[p++] = 0xa0 | len;
     else if (len < 0x100) { b[p++] = 0xd9; b[p++] = len; }
     else { b[p++] = 0xda; b[p++] = len & 0xff; b[p++] = len >>> 8; }
-    const bytes = pool.bytes;
+    const bytes = pool.chars;
     for (let i = 0; i < len; i++) b[p + i] = bytes[at + i];
     this.p = p + len;
   }
@@ -1500,7 +1500,7 @@ export class Codec {
         }
         g = this.gameGroup[baseId];
         if (g === 0) {
-          g = (this.groups < GROUP_MAX ? this.groups++ : GROUP_MAX - 1) + 1;
+          g = (this.groupsUsed < GROUP_MAX ? this.groupsUsed++ : GROUP_MAX - 1) + 1;
           this.gameGroup[baseId] = g;
         }
         g -= 1;
@@ -1515,7 +1515,7 @@ export class Codec {
     this.tCarId = new Int32Array(n);
     this.avType = -1;
     this.syType = -1;
-    if (game && this.gameAware) this.findGameTypes(schema);
+    if (game && this.formulas) this.findGameTypes(schema);
     // a fresh structure table
     this.hN = 0;
     this.slotUsed = 0;
@@ -1883,7 +1883,7 @@ export class Codec {
       const actual = enc ? (this.p < this.end ? this.b[this.p] : HEAD_END) : 0;
       let sym: number;
       if (isStruct) {
-        charge(rc, ROLE.HEAD);
+        if (MEASURE) rc.role = ROLE.HEAD;
         // Guess the next field marker: what followed this marker last time in this structure, else in any
         // structure of its type. One bit says "as guessed"; only a miss pays for the full 9 bit symbol.
         const gk = g * HEAD_SYMBOLS + prevHead;
@@ -1918,7 +1918,7 @@ export class Codec {
         this.succ[sb + prevCode] = sym + 1;
         this.groupSucc[gk] = sym + 1;
       } else {
-        charge(rc, ROLE.CHEAD);
+        if (MEASURE) rc.role = ROLE.CHEAD;
         const k = this.hFid[cur] * OP_CODES + pcode;
         const base = this.ctx(this.collCtx, k, COLL_BLOCK);
         const pred = this.collSucc[k];
@@ -1963,7 +1963,7 @@ export class Codec {
       } else {
         const kind = this.hKind[cur];
         if (sym === OP_CLEAR || (kind === KIND_ARRAY && sym === OP_REVERSE)) continue;
-        charge(rc, ROLE.INDEX);
+        if (MEASURE) rc.role = ROLE.INDEX;
         const cid = this.hFid[cur];
         const ib = this.ctx(this.idxCtx, cid, IDX_BLOCK) + (sym >>> 6) * INT_BLOCK;
         if (kind === KIND_ARRAY && sym === OP_DELETE_BY_REFID) {
@@ -2078,7 +2078,7 @@ export class Codec {
   private switchRef(cur: number, visited: boolean): number {
     const rc = this.rc;
     const enc = ENCODE && this.enc;
-    charge(rc, ROLE.SWITCH);
+    if (MEASURE) rc.role = ROLE.SWITCH;
     const from = visited ? cur : START;
     const prev2 = visited ? this.swPrev : START;
     while (this.pendingHead < this.pendingLen && this.pendFlag[this.pending[this.pendingHead]] === 0) this.pendingHead++;
@@ -2307,7 +2307,7 @@ export class Codec {
    * the announcing structure (or of the collection's previous item) plus the offset seen last time for this field".
    */
   private newRef(fid: number, parent: number): number {
-    charge(this.rc, ROLE.NEWREF);
+    if (MEASURE) this.rc.role = ROLE.NEWREF;
     const isItem = this.hKind[parent] !== KIND_STRUCT;
     const first = isItem && this.hLastItem[parent] < 0;
     const base = isItem && !first ? this.hLastItem[parent] : this.hRef[parent];
@@ -2336,7 +2336,7 @@ export class Codec {
     if (val === VAL_REF) {
       let ti = s.fType[fi];
       if ((op & OP_ADD) === OP_ADD) {
-        charge(rc, ROLE.TYPEID);
+        if (MEASURE) rc.role = ROLE.TYPEID;
         const tc = this.ctx(this.typeCtx, fid, TYPE_BLOCK);
         if (rc.bit(tc, enc && this.p < this.end && this.b[this.p] === TYPE_ID ? 1 : 0) !== 0) {
           let typeId = 0;
@@ -2448,7 +2448,7 @@ export class Codec {
   /** `n` bytes of a fixed-width value with no better model: each in the context of its field and position. */
   private fixedBytes(fid: number, n: number): void {
     const rc = this.rc;
-    charge(rc, ROLE.OTHER);
+    if (MEASURE) rc.role = ROLE.OTHER;
     const base = this.ctx(this.otherCtx, fid, OTHER_BLOCK);
     if (ENCODE && this.enc) {
       for (let i = 0; i < n; i++) tree(rc, base + i * BYTE_VALUES, BYTE_BITS, this.b[this.p++]);
@@ -2469,11 +2469,11 @@ export class Codec {
       case PRIM_STRING: {
         const tv = fresh ? this.tplInt(ref, index) : -1;
         this.stringToken(this.strField(this.strFieldOf, fid), a & AUX_MASK, ROLE.STR_SYM, tv);
-        const si = this.strings.lastIndex;
+        const si = this.strings.codedIndex;
         this.saux[slot] = (si + 1) | AUX_WRITTEN;
         if (isStruct) {
           if (fresh) this.noteString(ref, slot, fid, si);
-          if (this.gameAware) this.linkPortal(ref, index);
+          if (this.formulas) this.linkPortal(ref, index);
         }
         return;
       }
@@ -2482,7 +2482,7 @@ export class Codec {
       case PRIM_INT8: {
         // the change from the slot's last value, in the context of the previous change and of the field written
         // just before in the same visit
-        charge(rc, ROLE.BYTE);
+        if (MEASURE) rc.role = ROLE.BYTE;
         const tv = fresh ? this.tplInt(ref, index) : -1;
         const prev = tv >= 0 ? tv : this.sv[slot];
         const last = tv >= 0 ? BYTE_TEMPLATE : a & AUX_MASK; // previous change + 1, 0 = no history
@@ -2515,7 +2515,7 @@ export class Codec {
       }
       case PRIM_UINT16:
       case PRIM_INT16: {
-        charge(rc, ROLE.INT16);
+        if (MEASURE) rc.role = ROLE.INT16;
         const tv = fresh ? this.tplInt(ref, index) : -1;
         const prev = tv >= 0 ? tv : this.sv[slot];
         const last = tv >= 0 ? I16_TEMPLATE : a & AUX_MASK; // size class of the previous change + 1
@@ -2547,7 +2547,7 @@ export class Codec {
         return;
       }
       case PRIM_NUMBER: {
-        charge(rc, ROLE.NUMCLS);
+        if (MEASURE) rc.role = ROLE.NUMCLS;
         const lastCls = a & 3; // previous kind + 1
         let cls = 0;
         if (enc) {
@@ -2558,7 +2558,7 @@ export class Codec {
         if (TUNING.NumClsFlag !== 0 && lastCls !== 0 && rc.bit(cb, cls + 1 === lastCls ? 1 : 0) !== 0) cls = lastCls - 1;
         else cls = tree(rc, cb, 2, cls);
         if (cls === NUM_INT) {
-          charge(rc, ROLE.NUMINT);
+          if (MEASURE) rc.role = ROLE.NUMINT;
           // a look-alike's first value only helps when it was an integer too (a `number` slot can hold either)
           let tv = fresh ? this.tplValue(ref, index) : NaN;
           if (!(tv === Math.floor(tv) && tv >= -NUM_INT_MAX && tv <= NUM_INT_MAX)) tv = NaN;
@@ -2670,7 +2670,7 @@ export class Codec {
   /** Code (or decode) the frame's clock hints, then start the frame. Encode: pass what measureStep found. */
   private codeStep(hasRatio: number, qRatio: number, hasExact: number, qExact: number, floatFrame: number): void {
     const rc = this.rc;
-    charge(rc, ROLE.STEP);
+    if (MEASURE) rc.role = ROLE.STEP;
     const mode = tree(rc, this.cStep + this.lastStepMode * STEP_MODES, STEP_BITS, hasRatio + 2 * hasExact + 4 * floatFrame);
     this.lastStepMode = mode;
     hasRatio = mode & 1;
@@ -2986,7 +2986,7 @@ export class Codec {
   private float32(ref: number, index: number, fid: number, slot: number): void {
     const rc = this.rc;
     const enc = ENCODE && this.enc;
-    charge(rc, ROLE.FLOAT);
+    if (MEASURE) rc.role = ROLE.FLOAT;
     const tracked = this.hKind[ref] === KIND_STRUCT;
     let fh = 0;
     let n = 0;
@@ -3210,7 +3210,7 @@ export class Codec {
   private msgBytes(path: number, n: number): number {
     const rc = this.rc;
     const enc = ENCODE && this.enc;
-    charge(rc, ROLE.MSGNUM);
+    if (MEASURE) rc.role = ROLE.MSGNUM;
     const nb = this.ctx(this.pNum, path, MSG_NUM_POS * BYTE_VALUES);
     let v = 0;
     let prev = 0;
@@ -3246,7 +3246,7 @@ export class Codec {
     if (pool.start[id + 1] - at !== len) throw new Error(CORRUPT);
     this.room(len);
     const b = this.b;
-    const bytes = pool.bytes;
+    const bytes = pool.chars;
     for (let i = 0; i < len; i++) b[this.p + i] = bytes[at + i];
     this.p += len;
   }
@@ -3270,7 +3270,7 @@ export class Codec {
     const enc = ENCODE && this.enc;
     if (depth > MSG_DEPTH_MAX) throw new Error(CORRUPT);
     if (!enc) this.room(0);
-    charge(rc, ROLE.MSGMARK);
+    if (MEASURE) rc.role = ROLE.MSGMARK;
     const last = this.pLast[path];
     const base = this.pCtx[path];
     const actual = enc ? this.b[this.p] : 0;
@@ -3289,21 +3289,21 @@ export class Codec {
     switch (m) {
       case 0xd9: return this.msgString(path, this.msgBytes(path, 1));
       case 0xda: return this.msgString(path, this.msgBytes(path, 2));
-      case 0xc4: return this.rawBytes(this.msgBytes(path, 1), ROLE.RAW, RAW_BIN);
-      case 0xc5: return this.rawBytes(this.msgBytes(path, 2), ROLE.RAW, RAW_BIN);
-      case 0xc6: return this.rawBytes(this.msgBytes(path, 4), ROLE.RAW, RAW_BIN);
-      case 0xc7: return this.rawBytes(this.msgBytes(path, 1) + 1, ROLE.RAW, RAW_BIN);
-      case 0xc8: return this.rawBytes(this.msgBytes(path, 2) + 1, ROLE.RAW, RAW_BIN);
-      case 0xc9: return this.rawBytes(this.msgBytes(path, 4) + 1, ROLE.RAW, RAW_BIN);
+      case 0xc4: return this.byteRun(this.msgBytes(path, 1), ROLE.RAW, RAW_BIN);
+      case 0xc5: return this.byteRun(this.msgBytes(path, 2), ROLE.RAW, RAW_BIN);
+      case 0xc6: return this.byteRun(this.msgBytes(path, 4), ROLE.RAW, RAW_BIN);
+      case 0xc7: return this.byteRun(this.msgBytes(path, 1) + 1, ROLE.RAW, RAW_BIN);
+      case 0xc8: return this.byteRun(this.msgBytes(path, 2) + 1, ROLE.RAW, RAW_BIN);
+      case 0xc9: return this.byteRun(this.msgBytes(path, 4) + 1, ROLE.RAW, RAW_BIN);
       case 0xca: case 0xce: case 0xd2: this.msgBytes(path, 4); return;
       case 0xcb: case 0xcf: case 0xd3: this.msgBytes(path, 8); return;
       case 0xcc: case 0xd0: this.msgBytes(path, 1); return;
       case 0xcd: case 0xd1: this.msgBytes(path, 2); return;
-      case 0xd4: return this.rawBytes(2, ROLE.RAW, RAW_BIN);
-      case 0xd5: return this.rawBytes(3, ROLE.RAW, RAW_BIN);
-      case 0xd6: return this.rawBytes(5, ROLE.RAW, RAW_BIN);
-      case 0xd7: return this.rawBytes(9, ROLE.RAW, RAW_BIN);
-      case 0xd8: return this.rawBytes(17, ROLE.RAW, RAW_BIN);
+      case 0xd4: return this.byteRun(2, ROLE.RAW, RAW_BIN);
+      case 0xd5: return this.byteRun(3, ROLE.RAW, RAW_BIN);
+      case 0xd6: return this.byteRun(5, ROLE.RAW, RAW_BIN);
+      case 0xd7: return this.byteRun(9, ROLE.RAW, RAW_BIN);
+      case 0xd8: return this.byteRun(17, ROLE.RAW, RAW_BIN);
       case 0xdc: return this.msgItems(path, this.msgBytes(path, 2), false, depth + 1);
       case 0xdd: return this.msgItems(path, this.msgBytes(path, 4), false, depth + 1);
       case 0xde: return this.msgItems(path, this.msgBytes(path, 2), true, depth + 1);
@@ -3323,7 +3323,7 @@ export class Codec {
     if (n === 0) return;
     const rc = this.rc;
     const enc = ENCODE && this.enc;
-    charge(rc, ROLE.HS_PREFIX);
+    if (MEASURE) rc.role = ROLE.HS_PREFIX;
     const keep = n <= PREFIX_KEEP;
     const at = kind * PREFIX_KEEP;
     if (TUNING.PrefixFlag !== 0 && keep && this.prefixLen[kind] === n) {
@@ -3346,7 +3346,7 @@ export class Codec {
       }
     }
     const start = this.p;
-    this.rawBytes(n, ROLE.HS_PREFIX, RAW_PREFIX + kind);
+    this.byteRun(n, ROLE.HS_PREFIX, RAW_PREFIX + kind);
     if (keep) {
       for (let i = 0; i < n; i++) this.prefixBytes[at + i] = this.b[start + i];
       this.prefixLen[kind] = n;
@@ -3449,27 +3449,27 @@ export class Codec {
     const len = this.fLen;
     const payload = this.fPayload;
     this.stats.frames++;
-    charge(rc, ROLE.KIND);
+    if (MEASURE) rc.role = ROLE.KIND;
     tree(rc, this.cKind + prevKind * KIND_SLOTS, KIND_BITS, kind);
-    charge(rc, ROLE.DT);
+    if (MEASURE) rc.role = ROLE.DT;
     const dk = kind * KIND_PREVS + prevKind;
     gamma2(rc, this.cDtHi + (dk * DT_BUCKETS + dtBucket(this.prevDt)) * CLASS_W, this.cDtLo + dk * GAMMA_W, GAMMA_BITS_WIDE, this.fDt);
     this.prevDt = this.fDt;
     if (kind === KIND_MESSAGE) {
-      charge(rc, ROLE.MSGTYPE);
+      if (MEASURE) rc.role = ROLE.MSGTYPE;
       rc.bit(this.cFlags + FLAG_TYPETAG, this.fTypeTag);
       let typeKey: number;
       if (this.fTypeTag === TYPE_TAG_STRING) {
         const s = this.fTypeStart;
         const e = s + this.fTypeLen;
         this.strings.code(this.msgTypes, this.strings.pool.find(b, s, e), b, s, e, 0, -1, ROLE.MSGTYPE);
-        typeKey = this.strings.lastIndex;
+        typeKey = this.strings.codedIndex;
       } else {
         gamma1(rc, this.cMsgNum, GAMMA_BITS_WIDE, this.fTypeNum);
         typeKey = NUM_TYPE_BASE + (this.fTypeNum < NUM_TYPE_SLOTS ? this.fTypeNum : NUM_TYPE_SLOTS - 1);
       }
       const root = this.pathChild(0, typeKey);
-      charge(rc, ROLE.MSGTYPE);
+      if (MEASURE) rc.role = ROLE.MSGTYPE;
       tree(rc, this.ctx(this.pEnc, root, 1 << ENC_BITS), ENC_BITS, this.fEnc);
       if (this.fEnc === ENC_NONE) return;
       this.p = payload;
@@ -3483,12 +3483,12 @@ export class Codec {
         this.stats.rawFrames++;
         this.stats.rawBytes += len;
         this.frameInt(FI_MSGLEN, len);
-        this.rawBytes(len, ROLE.RAW, RAW_FRAME);
+        this.byteRun(len, ROLE.RAW, RAW_FRAME);
       }
       return;
     }
     // state-like: offset, the bytes before it, then the schema body
-    charge(rc, ROLE.FRAME);
+    if (MEASURE) rc.role = ROLE.FRAME;
     const offset = this.fOffset;
     const same = offset === this.lastOffset[kind] ? 1 : 0;
     rc.bit(this.cFlags + FLAG_OFFSET + kind, same);
@@ -3502,7 +3502,7 @@ export class Codec {
       this.stats.rawFrames++;
       this.stats.rawBytes += len;
       this.frameInt(FI_RAWLEN, len);
-      this.rawBytes(len, ROLE.RAW, RAW_FRAME);
+      this.byteRun(len, ROLE.RAW, RAW_FRAME);
       return;
     }
     this.prefix(kind, offset);
@@ -3510,7 +3510,7 @@ export class Codec {
     const payloadEnd = payload + len;
     if (PRIOR && kind === KIND_HANDSHAKE && this.knownHandshake.length > 0) {
       // the type table the starting model carries costs one bit instead of the whole table
-      charge(rc, ROLE.FRAME);
+      if (MEASURE) rc.role = ROLE.FRAME;
       if (rc.bit(this.cFlags + FLAG_HS_KNOWN, this.isKnownHandshake(body, payloadEnd) ? 1 : 0) !== 0) {
         this.afterHandshake(b, body, payloadEnd);
         return;
@@ -3518,7 +3518,7 @@ export class Codec {
     }
     if (kind === KIND_HANDSHAKE) this.adoptSchema(bootSchema(), false);
     const ok = this.schema !== null && this.validate(body, payloadEnd);
-    charge(rc, ROLE.FRAME);
+    if (MEASURE) rc.role = ROLE.FRAME;
     rc.bit(this.cFlags + FLAG_WALKED, ok ? 1 : 0);
     if (ok) {
       this.p = body;
@@ -3533,7 +3533,7 @@ export class Codec {
       this.stats.rawBytes += payloadEnd - body;
       this.frameInt(FI_BODYLEN, payloadEnd - body);
       this.p = body;
-      this.rawBytes(payloadEnd - body, ROLE.RAW, RAW_FRAME);
+      this.byteRun(payloadEnd - body, ROLE.RAW, RAW_FRAME);
     }
     if (kind === KIND_HANDSHAKE) this.afterHandshake(b, body, payloadEnd);
   }
@@ -3552,10 +3552,10 @@ export class Codec {
     const framesStart = HEADER_FIXED_BYTES + metaLen;
     const tStart = trailerStart(b, framesStart);
     const framesEnd = tStart >= 0 ? tStart : b.length;
-    charge(rc, ROLE.META);
+    if (MEASURE) rc.role = ROLE.META;
     this.frameInt(FI_META, metaLen);
     this.p = HEADER_FIXED_BYTES;
-    this.rawBytes(metaLen, ROLE.META, RAW_META);
+    this.byteRun(metaLen, ROLE.META, RAW_META);
     let pos = framesStart;
     let prevKind = KIND_END;
     while (pos < framesEnd && this.readFrame(pos, framesEnd)) {
@@ -3563,20 +3563,20 @@ export class Codec {
       prevKind = this.fKind;
       pos = this.fEnd;
     }
-    charge(rc, ROLE.KIND);
+    if (MEASURE) rc.role = ROLE.KIND;
     tree(rc, this.cKind + prevKind * KIND_SLOTS, KIND_BITS, KIND_END);
     // bytes after the last clean frame (a cut or damaged tail), then the trailer summary
-    charge(rc, ROLE.TAIL);
+    if (MEASURE) rc.role = ROLE.TAIL;
     this.frameInt(FI_JUNK, framesEnd - pos);
     this.p = pos;
-    this.rawBytes(framesEnd - pos, ROLE.TAIL, RAW_TAIL);
-    charge(rc, ROLE.TAIL);
+    this.byteRun(framesEnd - pos, ROLE.TAIL, RAW_TAIL);
+    if (MEASURE) rc.role = ROLE.TAIL;
     rc.bit(this.cFlags + FLAG_TRAILER, tStart >= 0 ? 1 : 0);
     if (tStart >= 0) {
       const n = b.length - TRAILER_FOOTER_BYTES - tStart;
       this.frameInt(FI_TRAILER, n);
       this.p = tStart;
-      this.rawBytes(n, ROLE.TAIL, RAW_TRAILER);
+      this.byteRun(n, ROLE.TAIL, RAW_TRAILER);
     }
     return rc.finish();
   }
@@ -3587,22 +3587,22 @@ export class Codec {
    */
   decode(): Uint8Array {
     const rc = this.rc;
-    charge(rc, ROLE.META);
+    if (MEASURE) rc.role = ROLE.META;
     const metaLen = this.frameInt(FI_META, 0);
     this.p = 0;
-    this.rawBytes(metaLen, ROLE.META, RAW_META);
+    this.byteRun(metaLen, ROLE.META, RAW_META);
     for (let i = 0; i < MAGIC_BYTES; i++) this.emitByte(MAGIC[i]);
     this.emitByte(VERSION);
     this.emitU32(metaLen);
     this.emit(this.b, 0, metaLen);
     let prevKind = KIND_END;
     for (;;) {
-      charge(rc, ROLE.KIND);
+      if (MEASURE) rc.role = ROLE.KIND;
       const kind = tree(rc, this.cKind + prevKind * KIND_SLOTS, KIND_BITS, 0);
       if (kind === KIND_END) break;
       if (kind > KIND_MESSAGE) throw new Error(CORRUPT);
       if (ENCODE) this.stats.frames++;
-      charge(rc, ROLE.DT);
+      if (MEASURE) rc.role = ROLE.DT;
       const dk = kind * KIND_PREVS + prevKind;
       const dt = gamma2(rc, this.cDtHi + (dk * DT_BUCKETS + dtBucket(this.prevDt)) * CLASS_W, this.cDtLo + dk * GAMMA_W, GAMMA_BITS_WIDE, 0);
       this.prevDt = dt;
@@ -3610,42 +3610,42 @@ export class Codec {
       this.emitVarint(dt);
       this.p = 0;
       if (kind === KIND_MESSAGE) {
-        charge(rc, ROLE.MSGTYPE);
+        if (MEASURE) rc.role = ROLE.MSGTYPE;
         const tag = rc.bit(this.cFlags + FLAG_TYPETAG, 0);
         this.emitByte(tag);
         let typeKey: number;
         if (tag === TYPE_TAG_STRING) {
           const id = this.strings.code(this.msgTypes, ABSENT, this.b, 0, 0, 0, -1, ROLE.MSGTYPE);
-          typeKey = this.strings.lastIndex;
+          typeKey = this.strings.codedIndex;
           const pool = this.strings.pool;
           this.emitVarint(pool.start[id + 1] - pool.start[id]);
-          this.emit(pool.bytes, pool.start[id], pool.start[id + 1]);
+          this.emit(pool.chars, pool.start[id], pool.start[id + 1]);
         } else {
           const t = gamma1(rc, this.cMsgNum, GAMMA_BITS_WIDE, 0);
           this.emitVarint(t);
           typeKey = NUM_TYPE_BASE + (t < NUM_TYPE_SLOTS ? t : NUM_TYPE_SLOTS - 1);
         }
         const root = this.pathChild(0, typeKey);
-        charge(rc, ROLE.MSGTYPE);
+        if (MEASURE) rc.role = ROLE.MSGTYPE;
         const menc = tree(rc, this.ctx(this.pEnc, root, 1 << ENC_BITS), ENC_BITS, 0);
         if (menc > ENC_NONE) throw new Error(CORRUPT);
         this.emitByte(menc);
         if (menc !== ENC_NONE) {
           if (rc.bit(this.cFlags + FLAG_MSGWALK + menc, 0) !== 0) this.msgElem(root, 0);
-          else this.rawBytes(this.frameInt(FI_MSGLEN, 0), ROLE.RAW, RAW_FRAME);
+          else this.byteRun(this.frameInt(FI_MSGLEN, 0), ROLE.RAW, RAW_FRAME);
           this.emitVarint(this.p);
           this.emit(this.b, 0, this.p);
         }
       } else {
-        charge(rc, ROLE.FRAME);
+        if (MEASURE) rc.role = ROLE.FRAME;
         const same = rc.bit(this.cFlags + FLAG_OFFSET + kind, 0);
         const offset = same !== 0 ? this.lastOffset[kind] : this.frameInt(FI_OFFSET, 0);
         this.lastOffset[kind] = offset;
         const fits = rc.bit(this.cFlags + FLAG_FITS, 0);
-        if (fits === 0) this.rawBytes(this.frameInt(FI_RAWLEN, 0), ROLE.RAW, RAW_FRAME);
+        if (fits === 0) this.byteRun(this.frameInt(FI_RAWLEN, 0), ROLE.RAW, RAW_FRAME);
         else {
           this.prefix(kind, offset);
-          charge(rc, ROLE.FRAME);
+          if (MEASURE) rc.role = ROLE.FRAME;
           if (PRIOR && kind === KIND_HANDSHAKE && this.knownHandshake.length > 0 && rc.bit(this.cFlags + FLAG_HS_KNOWN, 0) !== 0) {
             const hs = this.knownHandshake;
             this.room(hs.length);
@@ -3653,13 +3653,13 @@ export class Codec {
             this.p += hs.length;
           } else {
             if (kind === KIND_HANDSHAKE) this.adoptSchema(bootSchema(), false);
-            charge(rc, ROLE.FRAME);
+            if (MEASURE) rc.role = ROLE.FRAME;
             if (rc.bit(this.cFlags + FLAG_WALKED, 0) !== 0) {
               if (this.schema === null) throw new Error(CORRUPT);
               this.codeStep(0, 0, 0, 0, 0);
               this.walkBody();
               this.endStateFrame();
-            } else this.rawBytes(this.frameInt(FI_BODYLEN, 0), ROLE.RAW, RAW_FRAME);
+            } else this.byteRun(this.frameInt(FI_BODYLEN, 0), ROLE.RAW, RAW_FRAME);
           }
         }
         this.emitVarint(offset);
@@ -3669,16 +3669,16 @@ export class Codec {
       }
       prevKind = kind;
     }
-    charge(rc, ROLE.TAIL);
+    if (MEASURE) rc.role = ROLE.TAIL;
     const junk = this.frameInt(FI_JUNK, 0);
     this.p = 0;
-    this.rawBytes(junk, ROLE.TAIL, RAW_TAIL);
+    this.byteRun(junk, ROLE.TAIL, RAW_TAIL);
     this.emit(this.b, 0, junk);
-    charge(rc, ROLE.TAIL);
+    if (MEASURE) rc.role = ROLE.TAIL;
     if (rc.bit(this.cFlags + FLAG_TRAILER, 0) !== 0) {
       const n = this.frameInt(FI_TRAILER, 0);
       this.p = 0;
-      this.rawBytes(n, ROLE.TAIL, RAW_TRAILER);
+      this.byteRun(n, ROLE.TAIL, RAW_TRAILER);
       this.emit(this.b, 0, n);
       this.emitU32(n);
       for (let i = 0; i < MAGIC_BYTES; i++) this.emitByte(TRAILER_MAGIC[i]);
