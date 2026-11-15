@@ -19,13 +19,14 @@
  * (preloadPool, preloadField). From then on a preloaded string is coded like one the file itself brought in.
  *
  * @interacts range-coder.ts through symbols.ts; intmap.ts (the pool and one sparse context map)
- * @deps      symbols.ts, intmap.ts
+ * @deps      symbols.ts, intmap.ts, range-coder.ts (charge), build.ts (the flags; `@build` tags, see build.ts)
  * @complexity O(log n) per string for its recency rank (n distinct values of the field), O(length) for the pool
  * @alloc     per distinct string per field: a few integers. Nothing per coded string.
  */
-import { RangeCoder } from './range-coder.ts';
+import { RangeCoder, charge } from './range-coder.ts';
 import { tree2, gamma, gammaSlots, GAMMA_BITS_NARROW } from './symbols.ts';
 import { PairMap, StringPool, Recency, ABSENT } from './intmap.ts';
+import { ENCODE, MEASURE } from './build.ts';
 
 /** Longest string the model accepts, in bytes (the walker never offers a longer one). */
 const STR_MAX = 65535;
@@ -52,15 +53,33 @@ const HEX = [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0
 /** First value of the two variant bits' digit ('8'). */
 const VARIANT_BASE = 8;
 
-/** Contexts newField() reserves for one field: three single flags, the hint flags, the index tree, three gamma blocks. */
-const FIELD_CONTEXTS = 3 + HINT_COLS + (1 << SMALL_BITS) + 3 * gammaSlots(GAMMA_BITS_NARROW);
+const GAMMA_N = gammaSlots(GAMMA_BITS_NARROW);
+// One field's contexts are one run, reserved by newField() in this order. Each constant is an offset into the run.
+/** One flag: "the string a look-alike structure had here". */
+const CTX_TPL = 0;
+/** HINT_COLS flags: "the value that followed this hint last time". */
+const CTX_NEXT = CTX_TPL + 1;
+/** The index tree of a small field (the general block; the per-hint blocks are separate, see hintBlock). */
+const CTX_SMALL_LO = CTX_NEXT + HINT_COLS;
+/** The recency rank of a large field, as a gamma block. */
+const CTX_LARGE = CTX_SMALL_LO + (1 << SMALL_BITS);
+/** One flag: "known to the pool". */
+const CTX_IN_POOL = CTX_LARGE + GAMMA_N;
+/** The pool recency rank, as a gamma block. */
+const CTX_POOL_RANK = CTX_IN_POOL + 1;
+/** One flag: "a UUID". */
+const CTX_UUID = CTX_POOL_RANK + GAMMA_N;
+/** The length of a literal, as a gamma block. */
+const CTX_LEN = CTX_UUID + 1;
+/** Contexts of one field: three single flags, the hint flags, the index tree, three gamma blocks. */
+const FIELD_CONTEXTS = CTX_LEN + GAMMA_N;
 
-export const CONFIG = Object.freeze({
+export const CONFIG = {
   /** First capacity of the per-field tables, in fields. */
   FieldsStart: 256,
   /** First capacity of one field's dictionary. */
   DictStart: 16,
-});
+} as const;
 
 /** Role offsets for bit accounting, added to the caller's base role. */
 export const ROLE_SYM = 0;
@@ -100,15 +119,7 @@ export class StringModel {
   private idOf: Int32Array[]; // index -> pool id
   private mtf: (Recency | null)[]; // large fields: their values by last use
   private next: Int32Array; // small fields: per hint, the index + 1 that followed it last time
-  private ctxTpl: Int32Array;
-  private ctxNext: Int32Array; // base of HINT_COLS flag contexts
-  private ctxSmallLo: Int32Array;
-  private ctxSmallHi: Int32Array; // base of a lazily filled table of HINT_COLS blocks, see smallHi
-  private ctxLarge: Int32Array;
-  private ctxInPool: Int32Array;
-  private ctxPoolRank: Int32Array;
-  private ctxUuid: Int32Array;
-  private ctxLen: Int32Array;
+  private ctx: Int32Array; // first context of the field's run of FIELD_CONTEXTS (the CTX_ offsets)
   private smallHi: Int32Array; // (field, hint) -> context base, 0 = not yet allocated
   /** Every pool string by last time it was new to a field. */
   private readonly gmtf: Recency;
@@ -117,9 +128,9 @@ export class StringModel {
   private readonly scratch: Uint8Array;
   /** Index (in its field) of the string just coded, for the caller's slot memory. */
   lastIndex: number;
-  /** Literal strings coded and their bytes, for the report. */
-  literals: number;
-  literalBytes: number;
+  /** Literal strings coded and their bytes, for the report. Kept in a build with MEASURE. */
+  literals!: number;
+  literalBytes!: number;
 
   constructor(rc: RangeCoder) {
     this.rc = rc;
@@ -132,23 +143,17 @@ export class StringModel {
     this.idOf = [];
     this.mtf = [];
     this.next = new Int32Array(n * HINT_COLS);
-    this.ctxTpl = new Int32Array(n);
-    this.ctxNext = new Int32Array(n);
-    this.ctxSmallLo = new Int32Array(n);
-    this.ctxSmallHi = new Int32Array(n);
-    this.ctxLarge = new Int32Array(n);
-    this.ctxInPool = new Int32Array(n);
-    this.ctxPoolRank = new Int32Array(n);
-    this.ctxUuid = new Int32Array(n);
-    this.ctxLen = new Int32Array(n);
+    this.ctx = new Int32Array(n);
     this.smallHi = new Int32Array(n * HINT_COLS);
     this.gmtf = new Recency();
     this.litHi = new PairMap();
     this.litLo = rc.alloc(BYTE_SLOTS * BYTE_SLOTS);
     this.scratch = new Uint8Array(1 << 16);
     this.lastIndex = -1;
-    this.literals = 0;
-    this.literalBytes = 0;
+    if (MEASURE) {
+      this.literals = 0;
+      this.literalBytes = 0;
+    }
   }
 
   /**
@@ -158,19 +163,10 @@ export class StringModel {
   newField(): number {
     const f = this.fields++;
     if (f >= this.count.length) this.growFields();
-    const rc = this.rc;
     this.idxOf.push(new Int32Array(CONFIG.DictStart));
     this.idOf.push(new Int32Array(CONFIG.DictStart));
     this.mtf.push(null);
-    // one run of FIELD_CONTEXTS contexts, in this order
-    this.ctxTpl[f] = rc.alloc(1);
-    this.ctxNext[f] = rc.alloc(HINT_COLS);
-    this.ctxSmallLo[f] = rc.alloc(1 << SMALL_BITS);
-    this.ctxLarge[f] = rc.alloc(gammaSlots(GAMMA_BITS_NARROW));
-    this.ctxInPool[f] = rc.alloc(1);
-    this.ctxPoolRank[f] = rc.alloc(gammaSlots(GAMMA_BITS_NARROW));
-    this.ctxUuid[f] = rc.alloc(1);
-    this.ctxLen[f] = rc.alloc(gammaSlots(GAMMA_BITS_NARROW));
+    this.ctx[f] = this.rc.alloc(FIELD_CONTEXTS);
     return f;
   }
 
@@ -186,31 +182,23 @@ export class StringModel {
     large.set(this.large);
     this.large = large;
     this.next = i32(this.next, HINT_COLS);
-    this.ctxTpl = i32(this.ctxTpl, 1);
-    this.ctxNext = i32(this.ctxNext, 1);
-    this.ctxSmallLo = i32(this.ctxSmallLo, 1);
-    this.ctxSmallHi = i32(this.ctxSmallHi, 1);
-    this.ctxLarge = i32(this.ctxLarge, 1);
-    this.ctxInPool = i32(this.ctxInPool, 1);
-    this.ctxPoolRank = i32(this.ctxPoolRank, 1);
-    this.ctxUuid = i32(this.ctxUuid, 1);
-    this.ctxLen = i32(this.ctxLen, 1);
+    this.ctx = i32(this.ctx, 1);
     this.smallHi = i32(this.smallHi, HINT_COLS);
   }
 
-  /** Number of distinct values field f has held. */
-  size(f: number): number {
-    return this.count[f];
-  }
-
-  /** Number of fields created so far. */
-  get fieldCount(): number {
+  /**
+   * Number of fields created so far. Read when a starting model is loaded, to check the fields it names.
+   * @build prior
+   */
+  get fieldsMade(): number {
     return this.fields;
   }
 
   /**
    * First index and number of the contexts that learn the bytes of literal strings whatever their field. A
    * starting model never sets these: literals are ids and player names, and their letter statistics stay out.
+   * For the prior trainer.
+   * @build measure
    */
   get literalContexts(): { first: number; count: number } {
     return { first: this.litLo, count: BYTE_SLOTS * BYTE_SLOTS };
@@ -220,9 +208,10 @@ export class StringModel {
    * First index and number of the contexts field f owns outright (its flags, its index and rank trees, its
    * literal length tree; not its hint blocks). For the prior trainer.
    * @complexity O(1) @alloc one small object
+   * @build measure
    */
   fieldContexts(f: number): { first: number; count: number } {
-    return { first: this.ctxTpl[f], count: FIELD_CONTEXTS };
+    return { first: this.ctx[f], count: FIELD_CONTEXTS };
   }
 
   /**
@@ -230,6 +219,7 @@ export class StringModel {
    * counts as the most recently used.
    * @param bytes the strings, back to back @param start where each begins; start[count] is the end of the last
    * @complexity O(bytes) @alloc the pool's tables
+   * @build prior
    */
   preloadPool(bytes: Uint8Array, start: Int32Array, count: number): void {
     if (this.pool.count !== 0) throw new Error('the string pool is not empty');
@@ -244,6 +234,7 @@ export class StringModel {
    * Give field f its starting dictionary: pool ids ids[from..to), which become indexes 0, 1, 2, ... of the
    * field. In a field past SMALL_MAX values index 0 counts as the most recently used.
    * @complexity O(to - from) @alloc the field's dictionary
+   * @build prior
    */
   preloadField(f: number, ids: Int32Array, from: number, to: number): void {
     if (this.count[f] !== 0) throw new Error('the field already has values');
@@ -277,6 +268,7 @@ export class StringModel {
   /**
    * Call fn(field, hint, base) for every hint block in existence. For the prior trainer.
    * @complexity O(fields x HINT_MAX) @alloc none
+   * @build measure
    */
   forEachHintBlock(fn: (f: number, h: number, base: number) => void): void {
     for (let f = 0; f < this.fields; f++) {
@@ -285,11 +277,6 @@ export class StringModel {
         if (base !== 0) fn(f, h, base);
       }
     }
-  }
-
-  /** Pool id of value `idx` of field f. */
-  idAt(f: number, idx: number): number {
-    return this.idOf[f][idx];
   }
 
   /** Append pool id `id` to field f and return its new index. */
@@ -333,16 +320,17 @@ export class StringModel {
    */
   code(f: number, id: number, b: Uint8Array, s: number, e: number, hint: number, tplIdx: number, role: number): number {
     const rc = this.rc;
-    const enc = rc.enc;
-    rc.role = role + ROLE_SYM;
+    const enc = ENCODE && rc.enc;
+    charge(rc, role + ROLE_SYM);
     const cnt = this.count[f];
+    const ctx = this.ctx[f];
     let idx = -1;
     if (enc && id !== ABSENT) {
       const map = this.idxOf[f];
       if (id < map.length) idx = map[id] - 1;
     }
     if (tplIdx >= 0 && tplIdx < cnt) {
-      if (rc.bit(this.ctxTpl[f], idx === tplIdx ? 1 : 0) !== 0) {
+      if (rc.bit(ctx + CTX_TPL, idx === tplIdx ? 1 : 0) !== 0) {
         if (this.large[f] !== 0) (this.mtf[f] as Recency).touch(tplIdx);
         this.lastIndex = tplIdx;
         return this.idOf[f][tplIdx];
@@ -353,10 +341,10 @@ export class StringModel {
       const nk = f * HINT_COLS + h;
       const pred = this.next[nk];
       let hit = 0;
-      if (pred !== 0) hit = rc.bit(this.ctxNext[f] + h, idx + 1 === pred ? 1 : 0);
+      if (pred !== 0) hit = rc.bit(ctx + CTX_NEXT + h, idx + 1 === pred ? 1 : 0);
       if (hit !== 0) idx = pred - 1;
       else {
-        const sym = tree2(rc, this.hintBlock(f, h), this.ctxSmallLo[f], SMALL_BITS, idx + 1);
+        const sym = tree2(rc, this.hintBlock(f, h), ctx + CTX_SMALL_LO, SMALL_BITS, idx + 1);
         if (sym > 0) {
           idx = sym - 1;
           if (idx >= cnt) throw new Error('packed data is damaged');
@@ -372,7 +360,7 @@ export class StringModel {
     // large field: recency rank, most recent = 0
     const m = this.mtf[f] as Recency;
     const rank = enc && idx >= 0 ? m.rankOf(idx) : -1;
-    const base = this.ctxLarge[f];
+    const base = ctx + CTX_LARGE;
     const sym = gamma(rc, base, GAMMA_BITS_NARROW, base + (1 << GAMMA_BITS_NARROW), rank + 1);
     if (sym > 0) {
       idx = m.itemAtRank(sym - 1);
@@ -389,22 +377,23 @@ export class StringModel {
   /** A string new to its field: from the pool by recency rank, or as a literal. Returns its pool id. */
   private codeNew(f: number, id: number, b: Uint8Array, s: number, e: number, role: number): number {
     const rc = this.rc;
-    const enc = rc.enc;
-    rc.role = role + ROLE_GLOBAL;
-    const known = rc.bit(this.ctxInPool[f], id !== ABSENT ? 1 : 0);
+    const enc = ENCODE && rc.enc;
+    const ctx = this.ctx[f];
+    charge(rc, role + ROLE_GLOBAL);
+    const known = rc.bit(ctx + CTX_IN_POOL, id !== ABSENT ? 1 : 0);
     if (known !== 0) {
       const g = this.gmtf;
-      const base = this.ctxPoolRank[f];
+      const base = ctx + CTX_POOL_RANK;
       const rank = gamma(rc, base, GAMMA_BITS_NARROW, base + (1 << GAMMA_BITS_NARROW), enc ? g.rankOf(id) : 0);
       id = g.itemAtRank(rank);
       if (id === ABSENT) throw new Error('packed data is damaged');
       g.touch(id);
       return id;
     }
-    rc.role = role + ROLE_LITERAL;
+    charge(rc, role + ROLE_LITERAL);
     const lit = this.scratch;
     let n: number;
-    const uuid = rc.bit(this.ctxUuid[f], enc && isUuid(b, s, e) ? 1 : 0);
+    const uuid = rc.bit(ctx + CTX_UUID, enc && isUuid(b, s, e) ? 1 : 0);
     if (uuid !== 0) {
       n = UUID_LEN;
       for (let i = 0; i < UUID_LEN; i++) {
@@ -414,7 +403,7 @@ export class StringModel {
         else lit[i] = HEX[rc.raw(NIBBLE_BITS, enc ? hexValue(b[s + i]) : 0)];
       }
     } else {
-      const base = this.ctxLen[f];
+      const base = ctx + CTX_LEN;
       n = gamma(rc, base, GAMMA_BITS_NARROW, base + (1 << GAMMA_BITS_NARROW), enc ? e - s : 0);
       if (n > STR_MAX) throw new Error('literal string too long');
       let prev = 0;
@@ -430,8 +419,10 @@ export class StringModel {
         lit[i] = prev;
       }
     }
-    this.literals++;
-    this.literalBytes += n;
+    if (MEASURE) {
+      this.literals++;
+      this.literalBytes += n;
+    }
     // the pool keeps the decoded bytes; when encoding they equal b[s..e)
     if (this.pool.find(lit, 0, n) !== ABSENT && !enc) throw new Error('literal already in the pool');
     if (enc) {

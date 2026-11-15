@@ -11,11 +11,12 @@
  *             class, the rest raw
  *
  * @interacts range-coder.ts (codes bits)
- * @deps      range-coder.ts
+ * @deps      range-coder.ts, build.ts (ENCODE: a build that only unpacks never computes the value to code)
  * @complexity O(bits) per symbol: n for a tree symbol, classBits + 2 for most gamma coded integers
  * @alloc     none
  */
 import { RangeCoder, RAW_BITS_MAX } from './range-coder.ts';
+import { ENCODE } from './build.ts';
 
 /** Bits below the leading one that get their own contexts; the rest are coded raw. */
 export const GAMMA_MODELED = 2;
@@ -71,7 +72,7 @@ export function sizeClass(v: number): number {
  * @complexity O(classBits + GAMMA_MODELED) coded bits plus one raw call per 16 further bits @alloc none
  */
 export function gamma(rc: RangeCoder, classBase: number, classBits: number, tailBase: number, v: number): number {
-  const cls = tree(rc, classBase, classBits, rc.enc ? sizeClass(v) : 0);
+  const cls = tree(rc, classBase, classBits, ENCODE && rc.enc ? sizeClass(v) : 0);
   return gammaTail(rc, tailBase, cls, v);
 }
 
@@ -81,7 +82,7 @@ export function gamma(rc: RangeCoder, classBase: number, classBits: number, tail
  * @complexity as gamma @alloc none
  */
 export function gamma1(rc: RangeCoder, base: number, classBits: number, v: number): number {
-  const cls = tree(rc, base, classBits, rc.enc ? sizeClass(v) : 0);
+  const cls = tree(rc, base, classBits, ENCODE && rc.enc ? sizeClass(v) : 0);
   return gammaTail(rc, base + (1 << classBits), cls, v);
 }
 
@@ -92,7 +93,7 @@ export function gamma1(rc: RangeCoder, base: number, classBits: number, v: numbe
  * @complexity as gamma @alloc none
  */
 export function gamma2(rc: RangeCoder, hi: number, lo: number, classBits: number, v: number): number {
-  const cls = tree2(rc, hi, lo, classBits, rc.enc ? sizeClass(v) : 0);
+  const cls = tree2(rc, hi, lo, classBits, ENCODE && rc.enc ? sizeClass(v) : 0);
   return gammaTail(rc, lo + (1 << classBits), cls, v);
 }
 
@@ -110,7 +111,7 @@ export function gammaTail(rc: RangeCoder, tailBase: number, cls: number, v: numb
   for (let k = 0; k < modeled; k++) {
     const shift = rest - 1 - k;
     // bits below 32 can be read from the low word with integer shifts; higher ones need exact division
-    const want = rc.enc ? (shift < 32 ? (v >>> shift) & 1 : Math.floor(v / POW2[shift]) % 2) : 0;
+    const want = ENCODE && rc.enc ? (shift < 32 ? (v >>> shift) & 1 : Math.floor(v / POW2[shift]) % 2) : 0;
     const b = rc.bit(mb + node, want);
     node = (node << 1) | b;
     out = out * 2 + b;
@@ -119,7 +120,7 @@ export function gammaTail(rc: RangeCoder, tailBase: number, cls: number, v: numb
   while (rest > 0) {
     const take = rest < RAW_BITS_MAX ? rest : RAW_BITS_MAX;
     const shift = rest - take;
-    const want = rc.enc ? (shift + take <= 32 ? (v >>> shift) & ((1 << take) - 1) : Math.floor(v / POW2[shift]) % POW2[take]) : 0;
+    const want = ENCODE && rc.enc ? (shift + take <= 32 ? (v >>> shift) & ((1 << take) - 1) : Math.floor(v / POW2[shift]) % POW2[take]) : 0;
     out = out * POW2[take] + rc.raw(take, want);
     rest -= take;
   }

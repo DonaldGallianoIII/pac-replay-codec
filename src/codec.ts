@@ -29,8 +29,13 @@
  * float32 rounding), and trig.ts for sine and cosine, so a build in another language can pack to the same bytes.
  * Floats that enter the model are made finite first, because the bits of a NaN are not the same everywhere.
  *
+ * Build flags (build.ts): what only packing needs sits behind ENCODE, the bit accounting and the trainer hooks
+ * behind MEASURE, loading a starting model behind PRIOR. Methods that one of them alone needs carry `@build` in
+ * their doc block and are left out of a packaged file without it. Whatever a build keeps, it codes bit for bit
+ * like every other build.
+ *
  * @interacts range-coder.ts, symbols.ts, strings.ts, intmap.ts, wire.ts, clrp.ts, trig.ts, prior.ts; no I/O
- * @deps      those modules only
+ * @deps      those modules and build.ts (the flags)
  * @complexity O(tokens): about 0.67 million tokens for a 3.4 MB replay (struct and collection operations, message
  *             elements), each a few dozen array reads and about 8 coder decisions. Switch targets scan at most
  *             SW_FORWARD list entries; a collection's recency list is scanned up to its length (about 20 structs).
@@ -47,7 +52,7 @@ import {
   KIND_MAP, KIND_ARRAY, VAL_PRIM, VAL_REF, PRIM_STRING, PRIM_NUMBER, PRIM_BOOLEAN, PRIM_INT8, PRIM_UINT8, PRIM_INT16,
   PRIM_UINT16, PRIM_FLOAT32, PRIM_WIDTH, Schema, bootSchema, parseReflection,
 } from './wire.ts';
-import { RangeCoder } from './range-coder.ts';
+import { RangeCoder, charge, LAZY_BACKOFF } from './range-coder.ts';
 import {
   tree, tree2, gamma1, gamma2, gammaSlots, sizeClass, zigzag, unzigzag, GAMMA_BITS_WIDE, GAMMA_BITS_NARROW,
   BACKOFF_MIN_COUNT,
@@ -57,16 +62,17 @@ import { StringModel, HINT_MAX } from './strings.ts';
 import { detSin, detCos } from './trig.ts';
 import { SITE, OWNER, CONTEXTS_UNCHECKED } from './prior.ts';
 import type { Prior } from './prior.ts';
+import { ENCODE, MEASURE, PRIOR } from './build.ts';
 
 /** Token roles, for the bit accounting: every coded bit is charged to the role current when it was coded. */
-export const ROLE = Object.freeze({
+export const ROLE = {
   META: 0, KIND: 1, DT: 2, FRAME: 3, HS_PREFIX: 4, HEAD: 5, CHEAD: 6, SWITCH: 7, NEWREF: 8, TYPEID: 9, INDEX: 10,
   KEY_SYM: 11, KEY_GLOBAL: 12, KEY_LIT: 13, STR_SYM: 14, STR_GLOBAL: 15, STR_LIT: 16, BYTE: 17, INT16: 18, NUMCLS: 19,
   NUMINT: 20, FLOAT: 21, OTHER: 22, MSGTYPE: 23, MSGMARK: 24, MSGNUM: 25, MSTR_SYM: 26, MSTR_GLOBAL: 27,
   MSTR_LIT: 28, RAW: 29, TAIL: 30, STEP: 31, COUNT: 32,
-});
-/** Role names in index order (without the COUNT entry). */
-export const ROLE_NAMES = Object.keys(ROLE).slice(0, ROLE.COUNT);
+} as const;
+/** Role names in index order (without the COUNT entry). Empty in a build without MEASURE. */
+export const ROLE_NAMES: string[] = MEASURE ? Object.keys(ROLE).slice(0, ROLE.COUNT) : [];
 
 /**
  * Speed tricks that can be switched off one at a time to measure what each costs in size.
@@ -117,13 +123,14 @@ export const TUNING = {
   TreeOrdinal: 0,
   /**
    * Two-context bits: once the specific context is in use, the general one stops learning from it and stays the
-   * model of "a context seen for the first time". Saves one update per such bit.
+   * model of "a context seen for the first time". Saves one update per such bit. The setting itself lives with
+   * the coder (range-coder.ts, LAZY_BACKOFF); a build with MEASURE hands this value to each coder it makes.
    */
-  LazyBackoff: 1,
+  LazyBackoff: LAZY_BACKOFF ? 1 : 0,
 };
 
 /** PAC's mini-game constants (app/core/mini-game.ts in PAC 6.11), used only by the game-aware predictors. */
-const PAC_MINIGAME = Object.freeze({
+const PAC_MINIGAME = {
   CenterX: 335,
   CenterY: 235,
   RadiusX: 150,
@@ -141,9 +148,9 @@ const PAC_MINIGAME = Object.freeze({
   AvatarStop: 2,
   /** Three physics steps per patch, each losing 0.06% per ms: distance(d ms) = 0.12 d (1 - 0.0002 d). */
   AvatarDrag: 0.0002,
-});
+} as const;
 
-export const CONFIG = Object.freeze({
+export const CONFIG = {
   /** ms: how far past the last clock value the encoder searches for this frame's. */
   CarouselStepMax: 400,
   /** ms: search range when the clock is not known yet (a carousel lasts well under this). */
@@ -168,7 +175,7 @@ export const CONFIG = Object.freeze({
   PairsStart: 1 << 16,
   /** First size of the frame buffer (decode), in bytes. */
   FrameBuf: 1 << 16,
-});
+} as const;
 
 // ---- limits (a frame that exceeds one is kept raw; a decoded value that does means a damaged file)
 /** Context groups for struct types (one per topmost ancestor). Types beyond this share the last group. */
@@ -412,6 +419,8 @@ const PRIOR_MISFIT = 'starting model does not fit this build';
 /** The visit context of a byte or 16 bit field: the marker written just before plus one, 0 to this. */
 const VISIT_PREV_MAX = HEAD_START + 1;
 
+const EMPTY = new Uint8Array(0);
+
 /** Exact powers of two as doubles, built by doubling, for score-based weights. */
 const POW2 = new Float64Array(64);
 POW2[0] = 1;
@@ -505,34 +514,37 @@ export interface CodecStats {
 export class Codec {
   readonly rc: RangeCoder;
   readonly strings: StringModel;
-  readonly stats: CodecStats;
+  /** The counters of a packing run. Kept in a build with ENCODE. */
+  readonly stats!: CodecStats;
   private readonly enc: boolean;
   private readonly gameAware: boolean;
-  /** Body of the handshake frame the starting model knows (empty: none). */
-  private readonly knownHandshake: Uint8Array;
+  /** Body of the handshake frame the starting model knows (empty: none). Kept in a build with PRIOR. */
+  private readonly knownHandshake!: Uint8Array;
   // bytes: the source file (encode) or the frame being built (decode)
   private b: Uint8Array;
   private p = 0;
-  private end = 0;
   private out: Uint8Array;
   private op = 0;
   private readonly limit: number;
-  // frame being read (encode)
-  private fKind = 0;
-  private fDt = 0;
-  private fOffset = 0;
-  private fLen = 0;
-  private fPayload = 0;
-  private fEnd = 0;
-  private fTypeTag = 0;
-  private fTypeNum = 0;
-  private fTypeStart = 0;
-  private fTypeLen = 0;
-  private fEnc = 0;
-  private vEnd = 0;
+  // The fields from here to the validator cursor belong to packing: they are set up in the constructor, in a
+  // build with ENCODE. `end` is where the body being walked ends in the source file.
+  private end!: number;
+  // frame being read
+  private fKind!: number;
+  private fDt!: number;
+  private fOffset!: number;
+  private fLen!: number;
+  private fPayload!: number;
+  private fEnd!: number;
+  private fTypeTag!: number;
+  private fTypeNum!: number;
+  private fTypeStart!: number;
+  private fTypeLen!: number;
+  private fEnc!: number;
+  private vEnd!: number;
   // validator cursor
-  private vp = 0;
-  private vend = 0;
+  private vp!: number;
+  private vend!: number;
   // static contexts
   private readonly cKind: number;
   private readonly cDtHi: number;
@@ -571,10 +583,11 @@ export class Codec {
   private refCap: number = CONFIG.RefsStart;
   private handleOf = new Int32Array(CONFIG.RefsStart).fill(-1);
   private pendFlag = new Uint8Array(CONFIG.RefsStart);
-  private ovStamp = new Int32Array(CONFIG.RefsStart);
-  private ovKind = new Uint8Array(CONFIG.RefsStart);
-  private ovType = new Int32Array(CONFIG.RefsStart);
-  private stamp = 0;
+  // the validator's notes on structures announced in the frame it is checking (a build with ENCODE)
+  private ovStamp!: Int32Array;
+  private ovKind!: Uint8Array;
+  private ovType!: Int32Array;
+  private stamp!: number;
   private pending = new Int32Array(CONFIG.HandlesStart);
   private pendingLen = 0;
   private pendingHead = 0;
@@ -700,8 +713,9 @@ export class Codec {
   private hasExact = 0;
   private floatFrame = 0;
   private exactStep = 0;
-  private stepRatioQ = 0;
-  private stepExactQ = 0;
+  // what measureStep found for the frame about to be coded (a build with ENCODE)
+  private stepRatioQ!: number;
+  private stepExactQ!: number;
   private lastExactFrame = LAST_EXACT_NEVER;
   // mini-game
   private mgT = -1;
@@ -710,14 +724,15 @@ export class Codec {
   private carType = -1;
   private carBorn = -1;
   private carCount = 0;
-  private carFull = 0;
+  /** Whole-range clock searches made for the current carousel (a build with ENCODE). */
+  private carFull!: number;
   private portalOf = new Int32Array(BYTE_VALUES);
-  // encoder look-ahead: the floats of the frame being validated
-  private ftH = new Int32Array(BYTE_VALUES);
-  private ftI = new Int32Array(BYTE_VALUES);
-  private ftV = new Float64Array(BYTE_VALUES);
-  private ftN = 0;
-  private readings = new Float64Array(BYTE_VALUES * 2);
+  // encoder look-ahead: the floats of the frame being validated (a build with ENCODE)
+  private ftH!: Int32Array;
+  private ftI!: Int32Array;
+  private ftV!: Float64Array;
+  private ftN!: number;
+  private readings!: Float64Array;
   // messages
   private readonly msgTypes: number;
   private readonly pathMap = new PairMap();
@@ -740,20 +755,52 @@ export class Codec {
    * @complexity O(table sizes): a few hundred KB of zeroed tables @alloc those tables
    */
   constructor(input: Uint8Array, encode: boolean, opts: CodecOptions) {
-    this.enc = encode;
+    const enc = ENCODE && encode;
+    this.enc = enc;
     this.gameAware = opts.gameAware;
-    const rc = new RangeCoder(encode ? null : input);
-    rc.lazy = TUNING.LazyBackoff !== 0;
+    const rc = new RangeCoder(enc ? null : input);
     this.rc = rc;
-    if (opts.account) {
-      rc.account = new Float64Array(ROLE.COUNT);
-      rc.decisions = new Float64Array(ROLE.COUNT);
+    if (MEASURE) {
+      rc.lazy = TUNING.LazyBackoff !== 0;
+      if (opts.account) {
+        rc.account = new Float64Array(ROLE.COUNT);
+        rc.decisions = new Float64Array(ROLE.COUNT);
+      }
     }
-    this.b = encode ? input : new Uint8Array(CONFIG.FrameBuf);
-    this.out = encode ? new Uint8Array(0) : new Uint8Array(opts.rawLen);
+    this.b = enc ? input : new Uint8Array(CONFIG.FrameBuf);
+    this.out = enc ? EMPTY : new Uint8Array(opts.rawLen);
     this.limit = opts.rawLen;
     this.strings = new StringModel(rc);
-    this.stats = { frames: 0, rawFrames: 0, rawBytes: 0, tokens: 0, switches: new Int32Array(7), steps: new Int32Array(4) };
+    if (ENCODE) {
+      this.stats = { frames: 0, rawFrames: 0, rawBytes: 0, tokens: 0, switches: new Int32Array(7), steps: new Int32Array(4) };
+      this.end = 0;
+      this.fKind = 0;
+      this.fDt = 0;
+      this.fOffset = 0;
+      this.fLen = 0;
+      this.fPayload = 0;
+      this.fEnd = 0;
+      this.fTypeTag = 0;
+      this.fTypeNum = 0;
+      this.fTypeStart = 0;
+      this.fTypeLen = 0;
+      this.fEnc = 0;
+      this.vEnd = 0;
+      this.vp = 0;
+      this.vend = 0;
+      this.ovStamp = new Int32Array(CONFIG.RefsStart);
+      this.ovKind = new Uint8Array(CONFIG.RefsStart);
+      this.ovType = new Int32Array(CONFIG.RefsStart);
+      this.stamp = 0;
+      this.stepRatioQ = 0;
+      this.stepExactQ = 0;
+      this.carFull = 0;
+      this.ftH = new Int32Array(BYTE_VALUES);
+      this.ftI = new Int32Array(BYTE_VALUES);
+      this.ftV = new Float64Array(BYTE_VALUES);
+      this.ftN = 0;
+      this.readings = new Float64Array(BYTE_VALUES * 2);
+    }
     this.cKind = rc.alloc(KIND_PREVS * KIND_SLOTS);
     this.cDtHi = rc.alloc(STATE_KINDS_ALL * KIND_PREVS * DT_BUCKETS * CLASS_W);
     this.cDtLo = rc.alloc(STATE_KINDS_ALL * KIND_PREVS * GAMMA_W);
@@ -764,14 +811,19 @@ export class Codec {
     this.cStepExact = rc.alloc(2 * GAMMA_W);
     this.cMsgNum = rc.alloc(GAMMA_W);
     this.msgTypes = this.strings.newField();
-    const prior = opts.prior ?? null;
-    this.knownHandshake = prior !== null ? prior.handshake : new Uint8Array(0);
-    if (prior !== null) this.applyPrior(prior);
+    if (PRIOR) {
+      const prior = opts.prior === undefined ? null : opts.prior;
+      this.knownHandshake = prior !== null ? prior.handshake : EMPTY;
+      if (prior !== null) this.applyPrior(prior);
+    }
   }
 
   // ---------------------------------------------------------------- starting model
 
-  /** Base of the context block rows[id][k], reserved on first use. */
+  /**
+   * Base of the context block rows[id][k], reserved on first use.
+   * @build prior
+   */
   private rowsBlock(rows: Rows, id: number, k: number, size: number): number {
     const e = rows.entry(id, k);
     let c = rows.ctx[e];
@@ -786,6 +838,7 @@ export class Codec {
    * Base of the context block that `site` keeps under the keys (a, b, c), created when absent, exactly as the
    * walker would create it on first use. This is the one place that maps a prior's block list to the tables.
    * Throws when a key is outside its table.
+   * @build prior
    */
   private siteBlock(site: number, a: number, b: number, c: number): number {
     const fits = (v: number, limit: number): void => {
@@ -814,7 +867,7 @@ export class Codec {
       case SITE.FLOAT_LO: fits(a, FID_SPACE); fits(b, FLOAT_KEYS); return this.rowsBlock(this.floatLo, a, b, FLOAT_LO_BLOCK);
       case SITE.FLOAT_HI: fits(a, FID_SPACE); fits(b, FLOAT_LASTS * FLOAT_KEYS); return this.rowsBlock(this.floatHi, a, b, FLOAT_HI_BLOCK);
       case SITE.OTHER: fits(a, FID_SPACE); return this.ctx(this.otherCtx, a, OTHER_BLOCK);
-      case SITE.STR_HINT: fits(a, this.strings.fieldCount); fits(b, HINT_MAX + 1); return this.strings.hintBlock(a, b);
+      case SITE.STR_HINT: fits(a, this.strings.fieldsMade); fits(b, HINT_MAX + 1); return this.strings.hintBlock(a, b);
       default: throw new Error(PRIOR_MISFIT);
     }
   }
@@ -826,6 +879,7 @@ export class Codec {
    * end up with every context at the same index. The final context count is checked against the model's: a build
    * whose tables are laid out differently refuses the model instead of misreading it.
    * @complexity O(strings + blocks + states) of the model: about 3 ms @alloc the blocks and dictionaries
+   * @build prior
    */
   private applyPrior(prior: Prior): void {
     const st = this.strings;
@@ -855,6 +909,7 @@ export class Codec {
    * Call fn(owner, key, field) for every string field in existence that a starting model can name (see OWNER).
    * For the prior trainer.
    * @complexity O(field id space) @alloc none
+   * @build measure
    */
   forEachStringField(fn: (owner: number, key: number, field: number) => void): void {
     fn(OWNER.MSGTYPE, 0, this.msgTypes);
@@ -866,12 +921,13 @@ export class Codec {
    * Call fn(site, a, b, c, base, size) for every context block in existence that a starting model can name (see
    * SITE): the inverse of siteBlock. For the prior trainer, which reads a finished model.
    * @complexity O(table sizes) @alloc two reverse lookup tables
+   * @build measure
    */
   forEachBlock(fn: (site: number, a: number, b: number, c: number, base: number, size: number) => void): void {
     const table = (site: number, t: Int32Array, size: number): void => {
       for (let k = 0; k < t.length; k++) if (t[k] !== 0) fn(site, k, 0, 0, t[k], size);
     };
-    const rows = (site: number, r: Rows, size: number): void => r.forEach((id, k, e) => fn(site, id, k, 0, r.ctx[e], size));
+    const rows = (site: number, r: Rows, size: number): void => r.forEachEntry((id, k, e) => fn(site, id, k, 0, r.ctx[e], size));
     /**
      * A pair map keyed by (entry of `r`, c): name the entry by its (id, k). Every entry of every row gets a name,
      * set or not: a prior may keep such a block without the row's own block.
@@ -881,7 +937,7 @@ export class Codec {
       r.forEachRow((id, first) => {
         for (let k = 0; k < width; k++) name[first + k] = id * width + k;
       });
-      map.forEach((e, c, base) => {
+      map.forEachPair((e, c, base) => {
         if (name[e] !== ABSENT) fn(site, Math.floor(name[e] / width), name[e] % width, c, base, size);
       });
     };
@@ -889,15 +945,15 @@ export class Codec {
     table(SITE.HEAD_FLAG_START, this.headFlagStart, HEAD_FLAGS);
     table(SITE.HEAD_FLAG, this.headFlag, HEAD_FLAGS);
     table(SITE.HEAD_TREE, this.headTree, missSize);
-    this.headMiss.forEach((a, b, base) => fn(SITE.HEAD_MISS, a, b, 0, base, missSize));
+    this.headMiss.forEachPair((a, b, base) => fn(SITE.HEAD_MISS, a, b, 0, base, missSize));
     table(SITE.COLL, this.collCtx, COLL_BLOCK);
     table(SITE.INDEX, this.idxCtx, IDX_BLOCK);
     table(SITE.SWITCH, this.swBlock, SW_BLOCK);
     table(SITE.TREE_STOP, this.treeBlock, TREE_STOPS);
-    this.twRows.forEach((id, k, e) => fn(SITE.TREE_STEP, id, k, 0, this.twRows.ctx[e], id < GROUP_MAX ? 1 << TREE_KID_BITS : INT_BLOCK));
+    this.twRows.forEachEntry((id, k, e) => fn(SITE.TREE_STEP, id, k, 0, this.twRows.ctx[e], id < GROUP_MAX ? 1 << TREE_KID_BITS : INT_BLOCK));
     table(SITE.NEW_REF, this.newRefCtx, INT_BLOCK);
     table(SITE.TYPE, this.typeCtx, TYPE_BLOCK);
-    this.typeLo.forEach((a, b, base) => fn(SITE.TYPE_LO, a, b, 0, base, BYTE_VALUES));
+    this.typeLo.forEachPair((a, b, base) => fn(SITE.TYPE_LO, a, b, 0, base, BYTE_VALUES));
     rows(SITE.BYTE, this.byteRows, BYTE_BLOCK);
     rowPairs(SITE.BYTE_HI, this.byteHi, this.byteRows, BYTE_LASTS, BYTE_BLOCK);
     rows(SITE.INT16, this.i16Rows, GAMMA_N);
@@ -999,7 +1055,10 @@ export class Codec {
     this.emitByte(Math.floor(v / 0x1000000) & 0xff);
   }
 
-  /** Encode only: a shortest-form varint at p, bounded by end. Returns it, or -1; sets vEnd. */
+  /**
+   * Encode only: a shortest-form varint at p, bounded by end. Returns it, or -1; sets vEnd.
+   * @build encode
+   */
   private varint(p: number, end: number): number {
     const b = this.b;
     let scale = 1;
@@ -1021,10 +1080,10 @@ export class Codec {
   /** `n` bytes as literal data, each in the context of the byte before it. */
   private rawBytes(n: number, role: number, space: number): void {
     const rc = this.rc;
-    rc.role = role;
+    charge(rc, role);
     const base = this.ctx(this.rawBase, space, RAW_SPACE_SIZE);
     let prev = 0;
-    if (this.enc) {
+    if (ENCODE && this.enc) {
       const b = this.b;
       let p = this.p;
       for (let i = 0; i < n; i++) prev = tree(rc, base + prev * BYTE_VALUES, BYTE_BITS, b[p++]);
@@ -1043,7 +1102,10 @@ export class Codec {
 
   // ---------------------------------------------------------------- Colyseus numbers
 
-  /** Encode only: the validated integer `number` at the cursor. */
+  /**
+   * Encode only: the validated integer `number` at the cursor.
+   * @build encode
+   */
   private num(): number {
     const b = this.b;
     const p = this.p;
@@ -1105,7 +1167,7 @@ export class Codec {
    */
   private intDiff(ctx: number, expect: number): number {
     const rc = this.rc;
-    if (this.enc) {
+    if (ENCODE && this.enc) {
       const v = this.num();
       const z = zigzag(v - expect);
       if (TUNING.IntZeroFlag !== 0) {
@@ -1124,7 +1186,7 @@ export class Codec {
   /** A Colyseus string token through the string model. Sets lastStr (its pool id). */
   private stringToken(sf: number, hint: number, role: number, tplIdx: number): void {
     const st = this.strings;
-    if (this.enc) {
+    if (ENCODE && this.enc) {
       const b = this.b;
       let p = this.p;
       const pre = b[p];
@@ -1247,9 +1309,11 @@ export class Codec {
     h.set(this.handleOf);
     this.handleOf = h;
     this.pendFlag = growU8(this.pendFlag, cap);
-    this.ovStamp = growI32(this.ovStamp, cap);
-    this.ovKind = growU8(this.ovKind, cap);
-    this.ovType = growI32(this.ovType, cap);
+    if (ENCODE) {
+      this.ovStamp = growI32(this.ovStamp, cap);
+      this.ovKind = growU8(this.ovKind, cap);
+      this.ovType = growI32(this.ovType, cap);
+    }
     this.refCap = cap;
   }
 
@@ -1489,7 +1553,7 @@ export class Codec {
         this.carType = ti;
         this.carBorn = this.frameNo;
         this.carCount = 0;
-        this.carFull = 0;
+        if (ENCODE) this.carFull = 0;
         this.mgT = -1; // a new carousel restarts the mini-game clock
       }
       this.hCar[h] = this.carGroup;
@@ -1553,7 +1617,10 @@ export class Codec {
 
   // ---------------------------------------------------------------- validation (encode only)
 
-  /** A canonical integer `number` at vp. Returns it and advances, or NaN when it is anything else. */
+  /**
+   * A canonical integer `number` at vp. Returns it and advances, or NaN when it is anything else.
+   * @build encode
+   */
   private vInt(): number {
     const b = this.b;
     const p = this.vp;
@@ -1623,7 +1690,10 @@ export class Codec {
     }
   }
 
-  /** A string in the encoder's shortest spelling at vp, no longer than STR_MAX. Advances. */
+  /**
+   * A string in the encoder's shortest spelling at vp, no longer than STR_MAX. Advances.
+   * @build encode
+   */
   private vString(): boolean {
     const b = this.b;
     const p = this.vp;
@@ -1651,7 +1721,10 @@ export class Codec {
     return true;
   }
 
-  /** Remember a float of the frame being validated, for the clock measurement. */
+  /**
+   * Remember a float of the frame being validated, for the clock measurement.
+   * @build encode
+   */
   private floatToken(h: number, index: number, at: number): void {
     if (this.ftN === this.ftH.length) {
       const cap = this.ftN * 2;
@@ -1665,7 +1738,10 @@ export class Codec {
     this.ftN++;
   }
 
-  /** The value of one field or item, checked. `h` is the structure's handle, or -1 when it is new this frame. */
+  /**
+   * The value of one field or item, checked. `h` is the structure's handle, or -1 when it is new this frame.
+   * @build encode
+   */
   private vValue(op: number, fi: number, item: boolean, h: number, index: number): boolean {
     const b = this.b;
     const s = this.schema as Schema;
@@ -1733,6 +1809,7 @@ export class Codec {
    * prefixes are in the encoder's shortest form, values are inside the limits, and the walk ends on the frame's
    * last byte. Changes no model state. Collects the frame's floats for the clock measurement.
    * @complexity O(tokens in the frame) @alloc none in the steady state
+   * @build encode
    */
   private validate(start: number, end: number): boolean {
     const b = this.b;
@@ -1790,7 +1867,7 @@ export class Codec {
    */
   private walkBody(): void {
     const rc = this.rc;
-    const enc = this.enc;
+    const enc = ENCODE && this.enc;
     const s = this.schema as Schema;
     let cur = ROOT;
     let isStruct = true;
@@ -1801,12 +1878,12 @@ export class Codec {
     let pcode = 0; // collections: code of the previous operation in this visit
     let visited = false; // false until the first op of the frame: the first switch is keyed on "frame start"
     for (;;) {
-      this.stats.tokens++;
+      if (ENCODE) this.stats.tokens++;
       if (!enc) this.room(0);
       const actual = enc ? (this.p < this.end ? this.b[this.p] : HEAD_END) : 0;
       let sym: number;
       if (isStruct) {
-        rc.role = ROLE.HEAD;
+        charge(rc, ROLE.HEAD);
         // Guess the next field marker: what followed this marker last time in this structure, else in any
         // structure of its type. One bit says "as guessed"; only a miss pays for the full 9 bit symbol.
         const gk = g * HEAD_SYMBOLS + prevHead;
@@ -1841,7 +1918,7 @@ export class Codec {
         this.succ[sb + prevCode] = sym + 1;
         this.groupSucc[gk] = sym + 1;
       } else {
-        rc.role = ROLE.CHEAD;
+        charge(rc, ROLE.CHEAD);
         const k = this.hFid[cur] * OP_CODES + pcode;
         const base = this.ctx(this.collCtx, k, COLL_BLOCK);
         const pred = this.collSucc[k];
@@ -1886,7 +1963,7 @@ export class Codec {
       } else {
         const kind = this.hKind[cur];
         if (sym === OP_CLEAR || (kind === KIND_ARRAY && sym === OP_REVERSE)) continue;
-        rc.role = ROLE.INDEX;
+        charge(rc, ROLE.INDEX);
         const cid = this.hFid[cur];
         const ib = this.ctx(this.idxCtx, cid, IDX_BLOCK) + (sym >>> 6) * INT_BLOCK;
         if (kind === KIND_ARRAY && sym === OP_DELETE_BY_REFID) {
@@ -2000,8 +2077,8 @@ export class Codec {
    */
   private switchRef(cur: number, visited: boolean): number {
     const rc = this.rc;
-    const enc = this.enc;
-    rc.role = ROLE.SWITCH;
+    const enc = ENCODE && this.enc;
+    charge(rc, ROLE.SWITCH);
     const from = visited ? cur : START;
     const prev2 = visited ? this.swPrev : START;
     while (this.pendingHead < this.pendingLen && this.pendFlag[this.pending[this.pendingHead]] === 0) this.pendingHead++;
@@ -2046,16 +2123,16 @@ export class Codec {
     else sym = this.switchClass(blk + SW_HI_OFF + (last * 2 + hasPair) * SW_CLASS_BLOCK, blk + SW_LO_OFF, sym);
     let cls: number;
     if (sym === SW_PAIR) {
-      this.stats.switches[0]++;
+      if (ENCODE) this.stats.switches[0]++;
       target = pairHit;
       cls = 1;
     } else if (sym < SW_FWD) {
-      this.stats.switches[1]++;
+      if (ENCODE) this.stats.switches[1]++;
       const r = sym - SW_RECENT;
       target = r < this.hRecentN[from] ? this.hRecent[from * SW_RECENT_MAX + r] : -1;
       cls = 2;
     } else if (sym < SW_BACK) {
-      this.stats.switches[2]++;
+      if (ENCODE) this.stats.switches[2]++;
       let n = this.hLn[from];
       for (let k = SW_FWD; k < sym && n >= 0; k++) {
         // a structure passed over again and again has gone quiet (a finished fight): drop it from the list
@@ -2066,24 +2143,24 @@ export class Codec {
       target = n;
       cls = sym === SW_FWD ? 3 : 4;
     } else if (sym < SW_PENDING) {
-      this.stats.switches[3]++;
+      if (ENCODE) this.stats.switches[3]++;
       let n = this.hLp[from];
       for (let k = SW_BACK; k < sym && n >= 0; k++) n = this.hLp[n];
       target = n;
       cls = 5;
     } else if (sym === SW_PENDING) {
-      this.stats.switches[4]++;
+      if (ENCODE) this.stats.switches[4]++;
       target = pend >= 0 ? this.handleOf[pend] : -1;
       cls = 6;
     } else {
       target = this.treeWalk(cur, target, blk, g);
       cls = 7;
       if (target < 0) {
-        this.stats.switches[6]++;
+        if (ENCODE) this.stats.switches[6]++;
         const z = gamma1(rc, blk + SW_ID_OFF, GAMMA_BITS_NARROW, enc ? zigzag(id - this.hRef[cur]) : 0);
         if (!enc) id = this.hRef[cur] + unzigzag(z);
         target = id >= 0 && id < this.refCap ? this.handleOf[id] : -1;
-      } else this.stats.switches[5]++;
+      } else if (ENCODE) this.stats.switches[5]++;
     }
     if (target <= START) throw new Error(CORRUPT);
     // unless it was found just ahead in the visiting order, the target now follows `from` there
@@ -2139,7 +2216,7 @@ export class Codec {
    */
   private treeWalk(cur: number, target: number, blk: number, g: number): number {
     const rc = this.rc;
-    const enc = this.enc;
+    const enc = ENCODE && this.enc;
     const chain = this.chain;
     let up = TREE_FALLBACK;
     let left = 0;
@@ -2230,7 +2307,7 @@ export class Codec {
    * the announcing structure (or of the collection's previous item) plus the offset seen last time for this field".
    */
   private newRef(fid: number, parent: number): number {
-    this.rc.role = ROLE.NEWREF;
+    charge(this.rc, ROLE.NEWREF);
     const isItem = this.hKind[parent] !== KIND_STRUCT;
     const first = isItem && this.hLastItem[parent] < 0;
     const base = isItem && !first ? this.hLastItem[parent] : this.hRef[parent];
@@ -2254,12 +2331,12 @@ export class Codec {
       return;
     }
     const rc = this.rc;
-    const enc = this.enc;
+    const enc = ENCODE && this.enc;
     const id = this.newRef(fid, ref);
     if (val === VAL_REF) {
       let ti = s.fType[fi];
       if ((op & OP_ADD) === OP_ADD) {
-        rc.role = ROLE.TYPEID;
+        charge(rc, ROLE.TYPEID);
         const tc = this.ctx(this.typeCtx, fid, TYPE_BLOCK);
         if (rc.bit(tc, enc && this.p < this.end && this.b[this.p] === TYPE_ID ? 1 : 0) !== 0) {
           let typeId = 0;
@@ -2371,9 +2448,9 @@ export class Codec {
   /** `n` bytes of a fixed-width value with no better model: each in the context of its field and position. */
   private fixedBytes(fid: number, n: number): void {
     const rc = this.rc;
-    rc.role = ROLE.OTHER;
+    charge(rc, ROLE.OTHER);
     const base = this.ctx(this.otherCtx, fid, OTHER_BLOCK);
-    if (this.enc) {
+    if (ENCODE && this.enc) {
       for (let i = 0; i < n; i++) tree(rc, base + i * BYTE_VALUES, BYTE_BITS, this.b[this.p++]);
     } else {
       for (let i = 0; i < n; i++) this.b[this.p++] = tree(rc, base + i * BYTE_VALUES, BYTE_BITS, 0);
@@ -2383,7 +2460,7 @@ export class Codec {
   /** One primitive value of a schema field or collection item. */
   private primitive(prim: number, ref: number, index: number, fid: number): void {
     const rc = this.rc;
-    const enc = this.enc;
+    const enc = ENCODE && this.enc;
     const isStruct = this.hKind[ref] === KIND_STRUCT;
     const slot = isStruct ? this.hSlot[ref] + index : this.itemSlot(ref, index);
     const a = this.saux[slot];
@@ -2405,7 +2482,7 @@ export class Codec {
       case PRIM_INT8: {
         // the change from the slot's last value, in the context of the previous change and of the field written
         // just before in the same visit
-        rc.role = ROLE.BYTE;
+        charge(rc, ROLE.BYTE);
         const tv = fresh ? this.tplInt(ref, index) : -1;
         const prev = tv >= 0 ? tv : this.sv[slot];
         const last = tv >= 0 ? BYTE_TEMPLATE : a & AUX_MASK; // previous change + 1, 0 = no history
@@ -2438,7 +2515,7 @@ export class Codec {
       }
       case PRIM_UINT16:
       case PRIM_INT16: {
-        rc.role = ROLE.INT16;
+        charge(rc, ROLE.INT16);
         const tv = fresh ? this.tplInt(ref, index) : -1;
         const prev = tv >= 0 ? tv : this.sv[slot];
         const last = tv >= 0 ? I16_TEMPLATE : a & AUX_MASK; // size class of the previous change + 1
@@ -2470,7 +2547,7 @@ export class Codec {
         return;
       }
       case PRIM_NUMBER: {
-        rc.role = ROLE.NUMCLS;
+        charge(rc, ROLE.NUMCLS);
         const lastCls = a & 3; // previous kind + 1
         let cls = 0;
         if (enc) {
@@ -2481,7 +2558,7 @@ export class Codec {
         if (TUNING.NumClsFlag !== 0 && lastCls !== 0 && rc.bit(cb, cls + 1 === lastCls ? 1 : 0) !== 0) cls = lastCls - 1;
         else cls = tree(rc, cb, 2, cls);
         if (cls === NUM_INT) {
-          rc.role = ROLE.NUMINT;
+          charge(rc, ROLE.NUMINT);
           // a look-alike's first value only helps when it was an integer too (a `number` slot can hold either)
           let tv = fresh ? this.tplValue(ref, index) : NaN;
           if (!(tv === Math.floor(tv) && tv >= -NUM_INT_MAX && tv <= NUM_INT_MAX)) tv = NaN;
@@ -2554,7 +2631,7 @@ export class Codec {
     if (this.frameNo >= this.ft.length) this.ft = growF64(this.ft, this.ft.length * 2);
     this.hasRatio = hasRatio;
     this.hasExact = hasExact;
-    this.stats.steps[hasRatio + 2 * hasExact]++;
+    if (ENCODE) this.stats.steps[hasRatio + 2 * hasExact]++;
     let step = DL_DEFAULT + (hasRatio !== 0 ? qRatio / DL_QUANT : 0);
     this.exactStep = 0;
     if (hasExact !== 0) {
@@ -2593,13 +2670,13 @@ export class Codec {
   /** Code (or decode) the frame's clock hints, then start the frame. Encode: pass what measureStep found. */
   private codeStep(hasRatio: number, qRatio: number, hasExact: number, qExact: number, floatFrame: number): void {
     const rc = this.rc;
-    rc.role = ROLE.STEP;
+    charge(rc, ROLE.STEP);
     const mode = tree(rc, this.cStep + this.lastStepMode * STEP_MODES, STEP_BITS, hasRatio + 2 * hasExact + 4 * floatFrame);
     this.lastStepMode = mode;
     hasRatio = mode & 1;
     hasExact = (mode >> 1) & 1;
     this.floatFrame = mode >> 2;
-    if (hasRatio !== 0) qRatio = unzigzag(gamma1(rc, this.cStepRatio, GAMMA_BITS_WIDE, this.enc ? zigzag(qRatio) : 0));
+    if (hasRatio !== 0) qRatio = unzigzag(gamma1(rc, this.cStepRatio, GAMMA_BITS_WIDE, ENCODE && this.enc ? zigzag(qRatio) : 0));
     // a step in whole ms, or the absolute clock when it is not known yet
     if (hasExact !== 0) qExact = gamma1(rc, this.cStepExact + (this.mgT >= 0 ? 0 : GAMMA_W), GAMMA_BITS_WIDE, qExact);
     this.beginStateFrame(hasRatio, qRatio, hasExact, qExact);
@@ -2712,6 +2789,7 @@ export class Codec {
    * Encoder only: find the whole-ms mini-game clock that reproduces a carousel structure's x and y exactly.
    * Returns the clock, or -1 when no value in the search range fits (a carried item, a reversed carousel).
    * @complexity O(CarouselStepMax) when the clock is known, O(CarouselTMax) at the start of a carousel
+   * @build encode
    */
   private solveCarousel(): number {
     const known = this.mgT >= 0;
@@ -2758,6 +2836,7 @@ export class Codec {
    * step that would make its prediction exact); a majority vote among the readings is robust against a unit that
    * just changed direction. Returns the hint in 1/DL_QUANT ms around the nominal step (never 0).
    * @complexity O(F^2), F floats in the frame (up to about 80) @alloc none in the steady state
+   * @build encode
    */
   private measureRatio(): number {
     const T = this.ft[this.frameNo] + DL_DEFAULT; // frameNo is still the previous frame here
@@ -2819,6 +2898,7 @@ export class Codec {
   /**
    * Encoder only: pick this frame's clock hint from the floats the validator saw, before any of them is coded.
    * An exact carousel clock wins; else the ratio measured from the tracks; else none. Returns 1 for exact.
+   * @build encode
    */
   private measureStep(): number {
     this.stepRatioQ = 0;
@@ -2905,8 +2985,8 @@ export class Codec {
    */
   private float32(ref: number, index: number, fid: number, slot: number): void {
     const rc = this.rc;
-    const enc = this.enc;
-    rc.role = ROLE.FLOAT;
+    const enc = ENCODE && this.enc;
+    charge(rc, ROLE.FLOAT);
     const tracked = this.hKind[ref] === KIND_STRUCT;
     let fh = 0;
     let n = 0;
@@ -3040,6 +3120,7 @@ export class Codec {
   /**
    * Encode only: where the msgpack element at p ends, or -1 when it is not well formed, nests deeper than
    * MSG_DEPTH_MAX, or holds a string longer than STR_MAX. Changes nothing.
+   * @build encode
    */
   private mpSkip(p: number, end: number, depth: number): number {
     const b = this.b;
@@ -3128,8 +3209,8 @@ export class Codec {
   /** `n` plain bytes of a msgpack element (lengths, number payloads), each in the context of path and position. */
   private msgBytes(path: number, n: number): number {
     const rc = this.rc;
-    const enc = this.enc;
-    rc.role = ROLE.MSGNUM;
+    const enc = ENCODE && this.enc;
+    charge(rc, ROLE.MSGNUM);
     const nb = this.ctx(this.pNum, path, MSG_NUM_POS * BYTE_VALUES);
     let v = 0;
     let prev = 0;
@@ -3153,7 +3234,7 @@ export class Codec {
   private msgString(path: number, len: number): void {
     const st = this.strings;
     const sf = this.strField(this.pStr, path);
-    if (this.enc) {
+    if (ENCODE && this.enc) {
       const e = this.p + len;
       st.code(sf, st.pool.find(this.b, this.p, e), this.b, this.p, e, len, -1, ROLE.MSTR_SYM);
       this.p = e;
@@ -3186,10 +3267,10 @@ export class Codec {
   /** One msgpack element at the cursor, in either direction. `path` identifies its place in the message. */
   private msgElem(path: number, depth: number): void {
     const rc = this.rc;
-    const enc = this.enc;
+    const enc = ENCODE && this.enc;
     if (depth > MSG_DEPTH_MAX) throw new Error(CORRUPT);
     if (!enc) this.room(0);
-    rc.role = ROLE.MSGMARK;
+    charge(rc, ROLE.MSGMARK);
     const last = this.pLast[path];
     const base = this.pCtx[path];
     const actual = enc ? this.b[this.p] : 0;
@@ -3200,7 +3281,7 @@ export class Codec {
     this.pLast[path] = m;
     if (!enc) this.b[this.p] = m;
     this.p++;
-    this.stats.tokens++;
+    if (ENCODE) this.stats.tokens++;
     if (m < 0x80 || m >= 0xe0 || m === 0xc0 || m === 0xc2 || m === 0xc3) return;
     if (m < 0x90) return this.msgItems(path, m & 0x0f, true, depth + 1);
     if (m < 0xa0) return this.msgItems(path, m & 0x0f, false, depth + 1);
@@ -3241,8 +3322,8 @@ export class Codec {
   private prefix(kind: number, n: number): void {
     if (n === 0) return;
     const rc = this.rc;
-    const enc = this.enc;
-    rc.role = ROLE.HS_PREFIX;
+    const enc = ENCODE && this.enc;
+    charge(rc, ROLE.HS_PREFIX);
     const keep = n <= PREFIX_KEEP;
     const at = kind * PREFIX_KEEP;
     if (TUNING.PrefixFlag !== 0 && keep && this.prefixLen[kind] === n) {
@@ -3284,7 +3365,10 @@ export class Codec {
     else this.schema = null;
   }
 
-  /** Encode only: true when b[start..end) is the handshake body the starting model carries. */
+  /**
+   * Encode only: true when b[start..end) is the handshake body the starting model carries.
+   * @build encode
+   */
   private isKnownHandshake(start: number, end: number): boolean {
     const hs = this.knownHandshake;
     if (end - start !== hs.length) return false;
@@ -3293,7 +3377,10 @@ export class Codec {
     return true;
   }
 
-  /** Encode only: read the frame at pos into the f* fields. False when it is not a clean, shortest-form frame. */
+  /**
+   * Encode only: read the frame at pos into the f* fields. False when it is not a clean, shortest-form frame.
+   * @build encode
+   */
   private readFrame(pos: number, end: number): boolean {
     const b = this.b;
     const kind = b[pos];
@@ -3351,7 +3438,10 @@ export class Codec {
     return true;
   }
 
-  /** One frame, encode side. */
+  /**
+   * One frame, encode side.
+   * @build encode
+   */
   private codeFrame(prevKind: number): void {
     const rc = this.rc;
     const b = this.b;
@@ -3359,14 +3449,14 @@ export class Codec {
     const len = this.fLen;
     const payload = this.fPayload;
     this.stats.frames++;
-    rc.role = ROLE.KIND;
+    charge(rc, ROLE.KIND);
     tree(rc, this.cKind + prevKind * KIND_SLOTS, KIND_BITS, kind);
-    rc.role = ROLE.DT;
+    charge(rc, ROLE.DT);
     const dk = kind * KIND_PREVS + prevKind;
     gamma2(rc, this.cDtHi + (dk * DT_BUCKETS + dtBucket(this.prevDt)) * CLASS_W, this.cDtLo + dk * GAMMA_W, GAMMA_BITS_WIDE, this.fDt);
     this.prevDt = this.fDt;
     if (kind === KIND_MESSAGE) {
-      rc.role = ROLE.MSGTYPE;
+      charge(rc, ROLE.MSGTYPE);
       rc.bit(this.cFlags + FLAG_TYPETAG, this.fTypeTag);
       let typeKey: number;
       if (this.fTypeTag === TYPE_TAG_STRING) {
@@ -3379,7 +3469,7 @@ export class Codec {
         typeKey = NUM_TYPE_BASE + (this.fTypeNum < NUM_TYPE_SLOTS ? this.fTypeNum : NUM_TYPE_SLOTS - 1);
       }
       const root = this.pathChild(0, typeKey);
-      rc.role = ROLE.MSGTYPE;
+      charge(rc, ROLE.MSGTYPE);
       tree(rc, this.ctx(this.pEnc, root, 1 << ENC_BITS), ENC_BITS, this.fEnc);
       if (this.fEnc === ENC_NONE) return;
       this.p = payload;
@@ -3398,7 +3488,7 @@ export class Codec {
       return;
     }
     // state-like: offset, the bytes before it, then the schema body
-    rc.role = ROLE.FRAME;
+    charge(rc, ROLE.FRAME);
     const offset = this.fOffset;
     const same = offset === this.lastOffset[kind] ? 1 : 0;
     rc.bit(this.cFlags + FLAG_OFFSET + kind, same);
@@ -3418,9 +3508,9 @@ export class Codec {
     this.prefix(kind, offset);
     const body = payload + offset;
     const payloadEnd = payload + len;
-    if (kind === KIND_HANDSHAKE && this.knownHandshake.length > 0) {
+    if (PRIOR && kind === KIND_HANDSHAKE && this.knownHandshake.length > 0) {
       // the type table the starting model carries costs one bit instead of the whole table
-      rc.role = ROLE.FRAME;
+      charge(rc, ROLE.FRAME);
       if (rc.bit(this.cFlags + FLAG_HS_KNOWN, this.isKnownHandshake(body, payloadEnd) ? 1 : 0) !== 0) {
         this.afterHandshake(b, body, payloadEnd);
         return;
@@ -3428,7 +3518,7 @@ export class Codec {
     }
     if (kind === KIND_HANDSHAKE) this.adoptSchema(bootSchema(), false);
     const ok = this.schema !== null && this.validate(body, payloadEnd);
-    rc.role = ROLE.FRAME;
+    charge(rc, ROLE.FRAME);
     rc.bit(this.cFlags + FLAG_WALKED, ok ? 1 : 0);
     if (ok) {
       this.p = body;
@@ -3452,6 +3542,7 @@ export class Codec {
    * Encode a whole .colreplay. Returns the coded body, or null when the file does not start with a CLRP header
    * (the caller then stores it as it is).
    * @complexity O(file) @alloc the coded bytes
+   * @build encode
    */
   encode(): Uint8Array | null {
     const rc = this.rc;
@@ -3461,7 +3552,7 @@ export class Codec {
     const framesStart = HEADER_FIXED_BYTES + metaLen;
     const tStart = trailerStart(b, framesStart);
     const framesEnd = tStart >= 0 ? tStart : b.length;
-    rc.role = ROLE.META;
+    charge(rc, ROLE.META);
     this.frameInt(FI_META, metaLen);
     this.p = HEADER_FIXED_BYTES;
     this.rawBytes(metaLen, ROLE.META, RAW_META);
@@ -3472,14 +3563,14 @@ export class Codec {
       prevKind = this.fKind;
       pos = this.fEnd;
     }
-    rc.role = ROLE.KIND;
+    charge(rc, ROLE.KIND);
     tree(rc, this.cKind + prevKind * KIND_SLOTS, KIND_BITS, KIND_END);
     // bytes after the last clean frame (a cut or damaged tail), then the trailer summary
-    rc.role = ROLE.TAIL;
+    charge(rc, ROLE.TAIL);
     this.frameInt(FI_JUNK, framesEnd - pos);
     this.p = pos;
     this.rawBytes(framesEnd - pos, ROLE.TAIL, RAW_TAIL);
-    rc.role = ROLE.TAIL;
+    charge(rc, ROLE.TAIL);
     rc.bit(this.cFlags + FLAG_TRAILER, tStart >= 0 ? 1 : 0);
     if (tStart >= 0) {
       const n = b.length - TRAILER_FOOTER_BYTES - tStart;
@@ -3496,7 +3587,7 @@ export class Codec {
    */
   decode(): Uint8Array {
     const rc = this.rc;
-    rc.role = ROLE.META;
+    charge(rc, ROLE.META);
     const metaLen = this.frameInt(FI_META, 0);
     this.p = 0;
     this.rawBytes(metaLen, ROLE.META, RAW_META);
@@ -3506,12 +3597,12 @@ export class Codec {
     this.emit(this.b, 0, metaLen);
     let prevKind = KIND_END;
     for (;;) {
-      rc.role = ROLE.KIND;
+      charge(rc, ROLE.KIND);
       const kind = tree(rc, this.cKind + prevKind * KIND_SLOTS, KIND_BITS, 0);
       if (kind === KIND_END) break;
       if (kind > KIND_MESSAGE) throw new Error(CORRUPT);
-      this.stats.frames++;
-      rc.role = ROLE.DT;
+      if (ENCODE) this.stats.frames++;
+      charge(rc, ROLE.DT);
       const dk = kind * KIND_PREVS + prevKind;
       const dt = gamma2(rc, this.cDtHi + (dk * DT_BUCKETS + dtBucket(this.prevDt)) * CLASS_W, this.cDtLo + dk * GAMMA_W, GAMMA_BITS_WIDE, 0);
       this.prevDt = dt;
@@ -3519,7 +3610,7 @@ export class Codec {
       this.emitVarint(dt);
       this.p = 0;
       if (kind === KIND_MESSAGE) {
-        rc.role = ROLE.MSGTYPE;
+        charge(rc, ROLE.MSGTYPE);
         const tag = rc.bit(this.cFlags + FLAG_TYPETAG, 0);
         this.emitByte(tag);
         let typeKey: number;
@@ -3535,7 +3626,7 @@ export class Codec {
           typeKey = NUM_TYPE_BASE + (t < NUM_TYPE_SLOTS ? t : NUM_TYPE_SLOTS - 1);
         }
         const root = this.pathChild(0, typeKey);
-        rc.role = ROLE.MSGTYPE;
+        charge(rc, ROLE.MSGTYPE);
         const menc = tree(rc, this.ctx(this.pEnc, root, 1 << ENC_BITS), ENC_BITS, 0);
         if (menc > ENC_NONE) throw new Error(CORRUPT);
         this.emitByte(menc);
@@ -3546,7 +3637,7 @@ export class Codec {
           this.emit(this.b, 0, this.p);
         }
       } else {
-        rc.role = ROLE.FRAME;
+        charge(rc, ROLE.FRAME);
         const same = rc.bit(this.cFlags + FLAG_OFFSET + kind, 0);
         const offset = same !== 0 ? this.lastOffset[kind] : this.frameInt(FI_OFFSET, 0);
         this.lastOffset[kind] = offset;
@@ -3554,15 +3645,15 @@ export class Codec {
         if (fits === 0) this.rawBytes(this.frameInt(FI_RAWLEN, 0), ROLE.RAW, RAW_FRAME);
         else {
           this.prefix(kind, offset);
-          rc.role = ROLE.FRAME;
-          if (kind === KIND_HANDSHAKE && this.knownHandshake.length > 0 && rc.bit(this.cFlags + FLAG_HS_KNOWN, 0) !== 0) {
+          charge(rc, ROLE.FRAME);
+          if (PRIOR && kind === KIND_HANDSHAKE && this.knownHandshake.length > 0 && rc.bit(this.cFlags + FLAG_HS_KNOWN, 0) !== 0) {
             const hs = this.knownHandshake;
             this.room(hs.length);
             this.b.set(hs, this.p);
             this.p += hs.length;
           } else {
             if (kind === KIND_HANDSHAKE) this.adoptSchema(bootSchema(), false);
-            rc.role = ROLE.FRAME;
+            charge(rc, ROLE.FRAME);
             if (rc.bit(this.cFlags + FLAG_WALKED, 0) !== 0) {
               if (this.schema === null) throw new Error(CORRUPT);
               this.codeStep(0, 0, 0, 0, 0);
@@ -3578,12 +3669,12 @@ export class Codec {
       }
       prevKind = kind;
     }
-    rc.role = ROLE.TAIL;
+    charge(rc, ROLE.TAIL);
     const junk = this.frameInt(FI_JUNK, 0);
     this.p = 0;
     this.rawBytes(junk, ROLE.TAIL, RAW_TAIL);
     this.emit(this.b, 0, junk);
-    rc.role = ROLE.TAIL;
+    charge(rc, ROLE.TAIL);
     if (rc.bit(this.cFlags + FLAG_TRAILER, 0) !== 0) {
       const n = this.frameInt(FI_TRAILER, 0);
       this.p = 0;

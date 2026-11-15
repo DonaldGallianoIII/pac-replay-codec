@@ -47,9 +47,15 @@ export const KIND_ARRAY = 2;
 export const KIND_SET = 3;
 export const KIND_COLLECTION = 4;
 export const KIND_STREAM = 5;
-const COLLECTION_KINDS: Record<string, number> = {
-  map: KIND_MAP, array: KIND_ARRAY, set: KIND_SET, collection: KIND_COLLECTION, stream: KIND_STREAM,
-};
+/**
+ * Collection kind by the name the reflection uses, as kind number minus one. Names are kept as text, never as
+ * property names in the source, so a build that renames properties cannot touch them.
+ */
+const COLLECTION_NAMES = ['map', 'array', 'set', 'collection', 'stream'];
+const COLLECTION_KINDS: Record<string, number> = {};
+for (let i = 0; i < COLLECTION_NAMES.length; i++) COLLECTION_KINDS[COLLECTION_NAMES[i]] = i + 1;
+/** `own.call(table, key)`: true when the table itself holds the key (Object.hasOwn, for engines without it). */
+const own = Object.prototype.hasOwnProperty;
 
 // value classes of a field or of a collection's items
 export const VAL_PRIM = 0;
@@ -72,11 +78,19 @@ export const PRIM_FLOAT32 = 11;
 export const PRIM_FLOAT64 = 12;
 export const PRIM_BIGINT64 = 13;
 export const PRIM_BIGUINT64 = 14;
-const PRIM_IDS: Record<string, number> = {
-  string: PRIM_STRING, number: PRIM_NUMBER, boolean: PRIM_BOOLEAN, int8: PRIM_INT8, uint8: PRIM_UINT8,
-  int16: PRIM_INT16, uint16: PRIM_UINT16, int32: PRIM_INT32, uint32: PRIM_UINT32, int64: PRIM_INT64,
-  uint64: PRIM_UINT64, float32: PRIM_FLOAT32, float64: PRIM_FLOAT64, bigint64: PRIM_BIGINT64, biguint64: PRIM_BIGUINT64,
-};
+/** Primitive names in id order (PRIM_STRING = 0 ... PRIM_BIGUINT64 = 14), as text for the same reason. */
+const PRIM_NAMES = [
+  'string', 'number', 'boolean', 'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64', 'float32',
+  'float64', 'bigint64', 'biguint64',
+];
+/**
+ * Primitive id by name. A plain object on purpose, and looked up without an own-property test (primId): a type
+ * named like a member every object inherits ("constructor", "valueOf", "toString" ...) finds that member instead
+ * of failing, and ends up stored as primitive 0. Format version 1 has always read such a type table that way, so
+ * every build must: a table that rejects those names would walk a file differently from the build that packed it.
+ */
+const PRIM_IDS: Record<string, number> = {};
+for (let i = 0; i < PRIM_NAMES.length; i++) PRIM_IDS[PRIM_NAMES[i]] = i;
 /** Bytes of each primitive on the wire, by id; 0 for the two variable ones (string, number). */
 export const PRIM_WIDTH = [0, 0, 1, 1, 1, 2, 2, 4, 4, 8, 8, 4, 8, 8, 8];
 /** Wire primitive of a quantized field by its bit width. */
@@ -299,7 +313,7 @@ function buildSchema(raw: RawType[], rootId: number): Schema {
         if (typeIndex < 0) throw new Error('ref field without a type');
         s.fVal[at] = VAL_REF;
         s.fType[at] = typeIndex;
-      } else if (Object.hasOwn(COLLECTION_KINDS, head)) {
+      } else if (own.call(COLLECTION_KINDS, head)) {
         s.fVal[at] = VAL_COLL;
         s.fKind[at] = COLLECTION_KINDS[head];
         if (colon >= 0) {

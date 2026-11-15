@@ -23,11 +23,16 @@
  * compared through `>>> 0` and multiplied with Math.imul. That keeps every one of them a small integer for the
  * engine: no boxed doubles, no float conversions. The arithmetic is the same modulo 2^32.
  *
+ * Build flags (build.ts): the encoding half of every method is behind ENCODE, the bit accounting behind MEASURE.
+ * A build without one of them drops that code; what the rest reads and writes does not change by a bit.
+ *
  * @interacts none (owns its output buffer and its state table)
- * @deps      none
+ * @deps      build.ts (the flags)
  * @complexity O(1) per decision; a 3.4 MB replay is about 6 million decisions
  * @alloc     the state table and the output buffer grow by doubling; both are released with the coder
  */
+
+import { ENCODE, MEASURE } from './build.ts';
 
 /** Probability scale: p is out of 2^16. */
 const PROB_BITS = 16;
@@ -49,16 +54,24 @@ const PAD_MAX = 4;
 /** Most raw bits one raw() call may carry (range keeps at least 8 bits). */
 export const RAW_BITS_MAX = 16;
 
-export const CONFIG = Object.freeze({
+export const CONFIG = {
   /** Contexts settle at rate 1 / (CountLimit + 1.5). Lower adapts faster and codes stable contexts worse. */
   CountLimit: 30,
   /** First size of the state table, in contexts. A replay uses about 3 million; untouched pages cost nothing. */
   InitialContexts: 1 << 22,
   /** First size of the output buffer, in bytes. */
   InitialOut: 1 << 18,
-});
+} as const;
 
-const COUNT_LIMIT = CONFIG.CountLimit;
+/**
+ * Backoff rule for two-context bits, part of the packed format. True: once the specific context is in use, the
+ * general one stops learning from it (it stays the model of "a context seen for the first time"), which saves its
+ * update. False: both always learn. A build with MEASURE can try the other rule per coder (RangeCoder.lazy).
+ */
+export const LAZY_BACKOFF = true;
+
+const COUNT_LIMIT: number = CONFIG.CountLimit;
+const EMPTY = new Uint8Array(0);
 /** RATE[n]: the step toward the coded bit after n earlier observations, out of 2^16. */
 const RATE = new Uint16Array(COUNT_LIMIT + 1);
 for (let n = 0; n <= COUNT_LIMIT; n++) RATE[n] = Math.floor(65536 / (n + 1.5));
@@ -73,55 +86,57 @@ export class RangeCoder {
   used: number;
   // range, low and code hold unsigned 32 bit values as signed patterns
   private range: number;
-  private low: number;
-  private out: Uint8Array;
-  outLen: number;
+  // low, out and outLen exist in a build that encodes
+  private low!: number;
+  private out!: Uint8Array;
+  outLen!: number;
   private readonly inp: Uint8Array;
   private ip: number;
   /** Bytes read past the end of the input (decode). */
   private over: number;
   private code: number;
+  // the next five exist in a build with MEASURE
   /** Optional bit accounting: cost in bits by role. Null in normal use. */
-  account: Float64Array | null;
+  account!: Float64Array | null;
   /** Optional decision counting by role (how many bit() calls). Null in normal use. */
-  decisions: Float64Array | null;
-  /** Role the next bits are charged to when accounting is on. */
-  role: number;
+  decisions!: Float64Array | null;
+  /** Role the next bits are charged to when accounting is on (set through charge()). */
+  role!: number;
   /**
    * Optional observer, for the prior trainer: called with (context, bit, coded) for every modeled decision, where
    * coded is 1 when the bit was coded under that context and 0 when the context only learned from it. Only
    * honoured while accounting is on. Null in normal use.
    */
-  watch: ((i: number, b: number, coded: number) => void) | null;
-  /**
-   * Backoff rule for two-context bits. True: once the specific context is in use, the general one stops learning
-   * from it (it stays the model of "a context seen for the first time"), which saves its update. False: both
-   * always learn.
-   */
-  lazy: boolean;
+  watch!: ((i: number, b: number, coded: number) => void) | null;
+  /** The backoff rule of this coder (LAZY_BACKOFF unless a measurement run changes it). */
+  lazy!: boolean;
 
   /**
    * @param input packed bytes to decode, or null to encode
    * @complexity O(InitialContexts) @alloc the state table and, when encoding, the output buffer
    */
   constructor(input: Uint8Array | null = null) {
-    this.enc = input === null;
+    this.enc = ENCODE && input === null;
     this.st = new Uint32Array(CONFIG.InitialContexts);
     this.used = 1;
     this.range = -1;
-    this.low = 0;
-    this.out = this.enc ? new Uint8Array(CONFIG.InitialOut) : new Uint8Array(0);
-    this.outLen = 0;
-    this.inp = input ?? new Uint8Array(0);
+    this.inp = input === null ? EMPTY : input;
     this.ip = 0;
     this.over = 0;
     this.code = 0;
-    this.account = null;
-    this.decisions = null;
-    this.role = 0;
-    this.watch = null;
-    this.lazy = true;
-    if (!this.enc) for (let i = 0; i < FLUSH_BYTES; i++) this.code = (this.code << BYTE_SHIFT) | this.next();
+    if (ENCODE) {
+      this.low = 0;
+      this.out = this.enc ? new Uint8Array(CONFIG.InitialOut) : EMPTY;
+      this.outLen = 0;
+    }
+    if (MEASURE) {
+      this.account = null;
+      this.decisions = null;
+      this.role = 0;
+      this.watch = null;
+      this.lazy = LAZY_BACKOFF;
+    }
+    if (!(ENCODE && this.enc)) for (let i = 0; i < FLUSH_BYTES; i++) this.code = (this.code << BYTE_SHIFT) | this.next();
   }
 
   private next(): number {
@@ -154,13 +169,20 @@ export class RangeCoder {
     return base;
   }
 
-  private grow(): void {
+  /**
+   * Double the output buffer.
+   * @build encode
+   */
+  private growOut(): void {
     const o = new Uint8Array(this.out.length * 2);
     o.set(this.out);
     this.out = o;
   }
 
-  /** Add one to the bytes already written (low overflowed 2^32). */
+  /**
+   * Add one to the bytes already written (low overflowed 2^32).
+   * @build encode
+   */
   private carry(): void {
     const out = this.out;
     let i = this.outLen - 1;
@@ -179,7 +201,7 @@ export class RangeCoder {
     const range = this.range;
     const bound = Math.imul(range >>> PROB_BITS, p);
     let r: number;
-    if (this.enc) {
+    if (ENCODE && this.enc) {
       let low = this.low;
       if (b !== 0) r = bound;
       else {
@@ -188,7 +210,7 @@ export class RangeCoder {
         r = (range - bound) | 0;
       }
       while (r >>> 0 < RANGE_MIN) {
-        if (this.outLen === this.out.length) this.grow();
+        if (this.outLen === this.out.length) this.growOut();
         this.out[this.outLen++] = low >>> WORD_TOP_SHIFT;
         low <<= BYTE_SHIFT;
         r <<= BYTE_SHIFT;
@@ -211,7 +233,7 @@ export class RangeCoder {
       this.code = code;
     }
     this.range = r;
-    if (this.account !== null) {
+    if (MEASURE && this.account !== null) {
       this.account[this.role] -= Math.log2((b !== 0 ? p : 65536 - p) / 65536);
       if (this.decisions !== null) this.decisions[this.role]++;
       if (this.watch !== null) this.watch(i, b, 1);
@@ -233,10 +255,10 @@ export class RangeCoder {
     const st = this.st;
     const useHi = (st[hi] & COUNT_MASK) >= minCount;
     b = this.bit(useHi ? hi : lo, b);
-    if (useHi && this.lazy) return b;
+    if (useHi && (MEASURE ? this.lazy : LAZY_BACKOFF)) return b;
     // the context that was not used still learns, without coding
     const other = useHi ? lo : hi;
-    if (this.account !== null && this.watch !== null) this.watch(other, b, 0);
+    if (MEASURE && this.account !== null && this.watch !== null) this.watch(other, b, 0);
     const s = st[other] ^ STATE_FLIP;
     let p = s >>> PROB_BITS;
     const n = s & COUNT_MASK;
@@ -254,13 +276,13 @@ export class RangeCoder {
    */
   tree(base: number, nbits: number, v: number): number {
     let node = 1;
-    if (this.account !== null) {
+    if (MEASURE && this.account !== null) {
       for (let k = nbits - 1; k >= 0; k--) node = (node << 1) | this.bit(base + node, (v >>> k) & 1);
       return node - (1 << nbits);
     }
     const st = this.st;
     let r = this.range;
-    if (this.enc) {
+    if (ENCODE && this.enc) {
       let low = this.low;
       for (let k = nbits - 1; k >= 0; k--) {
         const i = base + node;
@@ -279,7 +301,7 @@ export class RangeCoder {
           p -= (p * RATE[n]) >>> PROB_BITS;
         }
         while (r >>> 0 < RANGE_MIN) {
-          if (this.outLen === this.out.length) this.grow();
+          if (this.outLen === this.out.length) this.growOut();
           this.out[this.outLen++] = low >>> WORD_TOP_SHIFT;
           low <<= BYTE_SHIFT;
           r <<= BYTE_SHIFT;
@@ -328,14 +350,14 @@ export class RangeCoder {
    */
   tree2(hi: number, lo: number, nbits: number, v: number, minCount: number): number {
     let node = 1;
-    if (this.account !== null || hi === lo) {
+    if ((MEASURE && this.account !== null) || hi === lo) {
       for (let k = nbits - 1; k >= 0; k--) node = (node << 1) | this.bit2(hi + node, lo + node, (v >>> k) & 1, minCount);
       return node - (1 << nbits);
     }
     const st = this.st;
-    const lazy = this.lazy;
+    const lazy = MEASURE ? this.lazy : LAZY_BACKOFF;
     let r = this.range;
-    if (this.enc) {
+    if (ENCODE && this.enc) {
       let low = this.low;
       for (let k = nbits - 1; k >= 0; k--) {
         const ih = hi + node;
@@ -357,7 +379,7 @@ export class RangeCoder {
             ph -= (ph * RATE[nh]) >>> PROB_BITS;
           }
           while (r >>> 0 < RANGE_MIN) {
-            if (this.outLen === this.out.length) this.grow();
+            if (this.outLen === this.out.length) this.growOut();
             this.out[this.outLen++] = low >>> WORD_TOP_SHIFT;
             low <<= BYTE_SHIFT;
             r <<= BYTE_SHIFT;
@@ -383,7 +405,7 @@ export class RangeCoder {
           pl -= (pl * RATE[nl]) >>> PROB_BITS;
         }
         while (r >>> 0 < RANGE_MIN) {
-          if (this.outLen === this.out.length) this.grow();
+          if (this.outLen === this.out.length) this.growOut();
           this.out[this.outLen++] = low >>> WORD_TOP_SHIFT;
           low <<= BYTE_SHIFT;
           r <<= BYTE_SHIFT;
@@ -460,12 +482,12 @@ export class RangeCoder {
    */
   raw(count: number, v: number): number {
     let r = (this.range >>> count) | 0;
-    if (this.enc) {
+    if (ENCODE && this.enc) {
       const add = Math.imul(r, v);
       let low = (this.low + add) | 0;
       if (low >>> 0 < add >>> 0) this.carry();
       while (r >>> 0 < RANGE_MIN) {
-        if (this.outLen === this.out.length) this.grow();
+        if (this.outLen === this.out.length) this.growOut();
         this.out[this.outLen++] = low >>> WORD_TOP_SHIFT;
         low <<= BYTE_SHIFT;
         r <<= BYTE_SHIFT;
@@ -482,20 +504,29 @@ export class RangeCoder {
       this.code = code;
     }
     this.range = r;
-    if (this.account !== null) this.account[this.role] += count;
+    if (MEASURE && this.account !== null) this.account[this.role] += count;
     return v;
   }
 
   /**
    * Finish encoding and return the packed bytes.
    * @complexity O(output) @alloc one exact-size copy
+   * @build encode
    */
   finish(): Uint8Array {
     for (let i = 0; i < FLUSH_BYTES; i++) {
-      if (this.outLen === this.out.length) this.grow();
+      if (this.outLen === this.out.length) this.growOut();
       this.out[this.outLen++] = this.low >>> WORD_TOP_SHIFT;
       this.low <<= BYTE_SHIFT;
     }
     return this.out.slice(0, this.outLen);
   }
+}
+
+/**
+ * Charge the bits coded from here on to `role`, for the bit accounting. A build without MEASURE drops the call.
+ * @complexity O(1) @alloc none
+ */
+export function charge(rc: RangeCoder, role: number): void {
+  if (MEASURE) rc.role = role;
 }

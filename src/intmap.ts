@@ -10,7 +10,7 @@
  * at all, two array reads per lookup.
  *
  * @interacts none
- * @deps      none
+ * @deps      none (the `@build` tags on a few methods are read by tools/build-web.mjs, see build.ts)
  * @complexity get, set, intern: O(1) expected, O(length) for the byte hash and compare of intern; Rows.entry O(1)
  * @alloc     tables double when half full; the string pool's byte store doubles when full; Rows adds one row of
  *            `width` integers the first time an id is used
@@ -25,7 +25,7 @@ const FNV_PRIME = 0x01000193;
 /** Value returned for a missing key. */
 export const ABSENT = -1;
 
-export const CONFIG = Object.freeze({
+export const CONFIG = {
   /** First capacity of a PairMap, in entries. Must be a power of two. */
   PairStart: 1 << 12,
   /** First capacity of the string pool's id table. Must be a power of two. */
@@ -36,7 +36,7 @@ export const CONFIG = Object.freeze({
   RowsStart: 8,
   /** First capacity of a Recency list, in time slots. Must be a power of two. */
   RecencyStart: 256,
-});
+} as const;
 
 /** Integers per PairMap slot: key a, key b, value. One slot is one cache line touch. */
 const PAIR_STRIDE = 3;
@@ -113,8 +113,9 @@ export class PairMap {
    * Call fn(a, b, value) for every entry, in table order (not insertion order). For the prior trainer, which
    * reads a finished model; nothing in the coding path uses it.
    * @complexity O(capacity) @alloc none
+   * @build measure
    */
-  forEach(fn: (a: number, b: number, v: number) => void): void {
+  forEachPair(fn: (a: number, b: number, v: number) => void): void {
     const t = this.t;
     for (let at = 0; at < t.length; at += PAIR_STRIDE) if (t[at] !== ABSENT) fn(t[at], t[at + 1], t[at + 2]);
   }
@@ -184,8 +185,9 @@ export class Rows {
    * Call fn(id, k, entry) for every entry whose `ctx` is set. For the prior trainer, which reads a finished
    * model; nothing in the coding path uses it.
    * @complexity O(ids + rows x width) @alloc none
+   * @build measure
    */
-  forEach(fn: (id: number, k: number, entry: number) => void): void {
+  forEachEntry(fn: (id: number, k: number, entry: number) => void): void {
     const rowOf = this.rowOf;
     for (let id = 0; id < rowOf.length; id++) {
       const r = rowOf[id];
@@ -198,6 +200,7 @@ export class Rows {
    * Call fn(id, first) for every row in existence, where first is the index of its entry 0 (entry k of the row
    * is first + k, set or not). For the prior trainer.
    * @complexity O(ids) @alloc none
+   * @build measure
    */
   forEachRow(fn: (id: number, first: number) => void): void {
     const rowOf = this.rowOf;
@@ -285,11 +288,6 @@ export class Recency {
     this.add(slot, 1);
   }
 
-  /** True when the item is in the list. */
-  has(item: number): boolean {
-    return item < this.slotOf.length && this.slotOf[item] !== 0;
-  }
-
   /**
    * Make `item` the most recent one (adding it when it is new).
    * @complexity O(log n) amortized @alloc doubles the tables when they fill
@@ -306,8 +304,9 @@ export class Recency {
   }
 
   /**
-   * Add a new item as the least recent one.
+   * Add a new item as the least recent one. Only a starting model fills a list from the old end.
    * @complexity O(log n) amortized @alloc doubles the tables when they fill
+   * @build prior
    */
   pushOldest(item: number): void {
     this.size++;
@@ -315,7 +314,12 @@ export class Recency {
     this.place(item, --this.lo);
   }
 
-  /** How many items were used more recently than `item` (which must be in the list). @complexity O(log n) */
+  /**
+   * How many items were used more recently than `item` (which must be in the list). Only the packer asks: the
+   * unpacker is told the rank and asks itemAtRank.
+   * @complexity O(log n)
+   * @build encode
+   */
   rankOf(item: number): number {
     const t = this.tree;
     let sum = 0;
@@ -360,11 +364,6 @@ export class StringPool {
     this.start = new Int32Array(CONFIG.PoolStart + 1);
     this.bytes = new Uint8Array(CONFIG.PoolBytesStart);
     this.count = 0;
-  }
-
-  /** Length in bytes of string `id`. */
-  length(id: number): number {
-    return this.start[id + 1] - this.start[id];
   }
 
   /**

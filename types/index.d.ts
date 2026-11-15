@@ -1,6 +1,7 @@
 /**
  * Types for the library entry of pac-replay-codec (web/lib/index.js). Written by hand for the public surface;
- * test/types-check.ts fails the type check if they stop matching src/index.ts.
+ * test/types-check.ts fails the type check if they stop matching src/index.ts. The unpack-only entry,
+ * "pac-replay-codec/decode", has its own file: types/decode.d.ts.
  *
  * @interacts web/lib/index.js (the module these types describe)
  * @deps      none
@@ -37,7 +38,10 @@ export interface Prior {
 export interface PackOptions {
   /** false: never use the PAC mini-game formulas, whatever the game version (default true). */
   gameAware?: boolean;
-  /** Collect bit costs and decision counts by role (slower; for measurement). */
+  /**
+   * Collect bit costs and decision counts by role (slower; for measurement). The packaged library ignores it: the
+   * accounting is only in a build from source (import ./src/index.ts from a clone).
+   */
   account?: boolean;
   /** A starting model (parsePrior). Used when it knows the replay's type table; else the replay is packed cold. */
   prior?: Prior | null;
@@ -56,7 +60,10 @@ export interface PackResult {
   priorId: number;
   /** The coder's counters; null in stored mode. */
   stats: CodecStats | null;
-  /** The coder itself, for measurement scripts; null in stored mode. Not part of the stable API. */
+  /**
+   * The coder itself, for measurement scripts run from source. Always null in the packaged library. Not part of the
+   * stable API.
+   */
   codec: unknown;
   /**
    * Null in normal use. A message when the coder failed on this input and the file was stored instead, or when the

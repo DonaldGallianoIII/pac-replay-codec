@@ -19,9 +19,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node }}
-      - name: Tests (includes the check that web/lib matches src)
+      # the build tools, the type checker, and the published 1.0.0 and 1.0.1 the tests hold every build against
+      - name: Install dev dependencies (pinned by package-lock.json)
+        run: npm ci --no-audit --no-fund
+      - name: Tests (includes the check that web/lib is what the build makes from src)
         run: node --test test/*.test.ts
-      - name: Install the type checker
-        run: npm install --no-audit --no-fund
-      - name: Type check (includes the check that types/index.d.ts matches src)
+      - name: Type check (includes the check that the types match src)
         run: npx tsc -p tsconfig.json

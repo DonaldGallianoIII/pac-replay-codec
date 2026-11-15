@@ -10,3 +10,5 @@ test/fixtures/local/
 # the synthetic test fixtures are made from a schema that is not a game; they hold no recorded play
 !test/fixtures/synthetic-*.colreplay
 *.tgz
+# source maps of the packaged codec: written by tools/build-web.mjs, shipped in the npm package, not kept in git
+web/lib/*.map
